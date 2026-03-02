@@ -1,7 +1,5 @@
-import sys
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
 import tkinter as tk
 from threading import Thread
 from std_msgs.msg import Bool
@@ -14,18 +12,21 @@ from PIL import ImageTk
 class ButtonPublisher(Node):
     def __init__(self):
         super().__init__('button_publisher')
-        self.publisher = self.create_publisher(Bool, 'start_button', 10)
+        self.start_stop_pub = self.create_publisher(Bool, 'start_button', 10)
+        self.failure_pub = self.create_publisher(Bool, 'failure_button', 10)
         self.get_logger().info("Button Publisher Node Started!")
         self.bridge = CvBridge()
         self.current_wrist_image = None
         self.current_tripod_image = None
+
+        # Camera Subscriptions
         self.wrist_sub = self.create_subscription(Image, 'camera_image/wrist', self.wrist_camera_callback, 10)
         self.tripod_sub = self.create_subscription(Image, 'camera_image/tripod', self.tripod_camera_callback, 10)
 
-    def publish_message(self, msg_data):
+    def publish_message(self, msg_data, publisher):
         msg = Bool()
         msg.data = msg_data
-        self.publisher.publish(msg)
+        publisher.publish(msg)
         self.get_logger().info(f"Publishing: {msg_data}")
 
     def wrist_camera_callback(self, msg):
@@ -51,13 +52,13 @@ class MyWindow:
         self.window = tk.Tk()
         self.window.title("ROS 2 Button Publisher")
 
-        # Button 1
-        self.button1 = tk.Button(self.window, text="Start", command=self.start_button_clicked)
-        self.button1.pack(pady=10)
+        # Start/Stop Button
+        self.start_stop_button = tk.Button(self.window, text="Start", command=self.start_stop_button_clicked)
+        self.start_stop_button.pack(pady=10)
 
-        # Button 2
-        self.button2 = tk.Button(self.window, text="Stop", command=self.stop_button_clicked)
-        self.button2.pack(pady=10)
+        # Failure Button
+        self.failure_button = tk.Button(self.window, text="Failure", command=self.failure_button_clicked)
+        self.failure_button.pack(pady=10)
 
         # Label to display the image
         self.image_label1 = tk.Label(self.window)
@@ -70,11 +71,18 @@ class MyWindow:
         self.update_image_thread.daemon = True
         self.update_image_thread.start()
 
-    def start_button_clicked(self):
-        self.ros_node.publish_message(True)
+    def start_stop_button_clicked(self):
+        current_text = self.start_stop_button.cget("text")
+        if current_text == "Start":
+            self.ros_node.publish_message(True, self.ros_node.start_stop_pub)
+            self.start_stop_button.config(text="Stop")
+        elif current_text == "Stop":
+            self.ros_node.publish_message(False, self.ros_node.start_stop_pub)
+            self.start_stop_button.config(text="Start")
 
-    def stop_button_clicked(self):
-        self.ros_node.publish_message(False)
+    def failure_button_clicked(self):
+        self.ros_node.publish_message(True, self.ros_node.failure_pub)
+
 
     def update_image(self):
         """Update the Tkinter image label with new images from ROS 2."""

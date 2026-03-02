@@ -1,42 +1,170 @@
+import time
+
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool
-from sensor_msgs.msg import Image
+from std_msgs.msg import Bool, Float32, Float32MultiArray
+from sensor_msgs.msg import Joy
+import numpy as np
+import tkinter as tk
+from scipy.spatial.transform import Rotation
 
 class CorrectionNode(Node):
     def __init__(self):
         super().__init__('correction_node')
 
-        self.wrist_sub = self.create_subscription(Image, '/camera_image/wrist', self.camera_callback, 10)
-        self.tripod_sub = self.create_subscription(Image, '/camera_image/tripod', self.camera_callback, 10)
+        # Joystick subscription
+        self.joy_sub = self.create_subscription(Joy, 'spacenav/joy', self.joystick_callback, 10)
+
+        self.servo_sub = self.create_subscription(Float32MultiArray, '/servo_state', self.servo_state_callback, 10)
+        self.gripper_sub = self.create_subscription(Float32, '/gripper_state', self.gripper_state_callback, 10)
 
         # Publisher to send commands to the arm
-        self.cmd_publisher = self.create_publisher(Twist, '/cmd_manual', 10)
-        self.mode_publisher = self.create_publisher(Bool, '/cmd_mode', 10)
+        self.gripper_pub = self.create_publisher(Float32, '/cmd_manual_gripper', 10)
+        self.servo_pub = self.create_publisher(Float32MultiArray, '/cmd_manual_servo', 10)
+
+        # Initializations
+        self.joystick_msg = None
+        self.latest_axes = np.zeros(6)  # [vx, vy, vz, wx, wy, wz]
+        self.servo_state = None
+        self.gripper_state = None
+        self.gripper_position = 0.0
+        self.gripper_target = 0.0
+        self.manual_mode = False
+        self.auto_closing = False
+        self.auto_open = False
+        self.dt = 1.0/30.0
+
+        # --- GUI for the gripper slider ---
+        self.root = tk.Tk()
+        self.root.title("Gripper Control")
+        self.root.geometry("1500x300")  # Larger window
+        
+        self.slider = tk.Scale(
+            self.root,
+            from_=0, to=1,
+            resolution=0.01,
+            orient='horizontal',
+            label='Gripper Open/Close',
+            command=self.update_gripper,
+            length=1700,  # Longer slider
+            width=100,     # Thicker slider
+            font=('Arial', 16, 'bold'),  # Larger font
+            troughcolor='#E0E0E0',  # Light gray background
+            sliderlength=80  # Larger slider handle
+        )
+        self.slider.pack(fill=tk.X, expand=True, padx=20, pady=50)  # More padding
+        self.slider.set(0)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.gripper_position = 0.0
+
+        self.key_step = 0.04
+        self.root.focus_force()
+        self.root.bind("<Left>", self.on_left_key)
+        self.root.bind("<Right>", self.on_right_key)
+        self.root.update()
 
         # Simulate correction with a timer (for demo)
         self.timer = self.create_timer(1.0, self.correction_callback)  # Run every 1 second
 
+    def servo_state_callback(self, msg):
+        self.servo_state = np.array(msg.data, dtype=np.float32)
+    
+    def gripper_state_callback(self, msg):
+        self.gripper_state = msg.data
+
+    def joystick_callback(self, msg: Joy):
+        """
+        Called by timer_callback
+        """
+        self.latest_axes = np.array(msg.axes[:6])  # [x, y, z, roll, pitch, yaw]
+        self.joystick_msg = msg
+        left_button = bool(msg.buttons[0])
+        right_button = bool(msg.buttons[1])
+
+        if left_button and not self.manual_mode:
+            self.manual_mode = True
+        if right_button and self.manual_mode:
+            self.manual_mode = False
+
     def correction_callback(self):
-        # Replace this with actual correction logic
-        cmd_msg = Twist()
-        mode_msg = Bool()
 
-        # Example: Inference might output a velocity command
-        cmd_msg.linear.x = 0.5  # Simulated output from inference model
+        if self.servo_state is None or self.gripper_state is None:
+            return
 
-        cmd_msg.linear.y = 2.0
-        cmd_msg.linear.z = 2.0
+        # Update gripper for up/down key presses
+        if self.auto_closing:
+            current_val = self.slider.get()
+            if current_val < self.gripper_target:
+                new_val = min(self.gripper_target, current_val + 0.02)
+                self.slider.set(new_val)
+                self.update_gripper(new_val)
+            else:
+                self.auto_closing = False
 
-        mode_msg.data = False  # Simulated mode switch to manual for correction
+        if self.auto_open:
+            current_val = self.slider.get()
+            if current_val > self.gripper_target:
+                new_val = max(self.gripper_target, current_val - 0.02)
+                self.slider.set(new_val)
+                self.update_gripper(new_val)
+            else:
+                self.auto_open = False
 
-        # Publish the command
-        self.cmd_publisher.publish(cmd_msg)
-        self.get_logger().info(f"Published Correction Command: {cmd_msg.linear.x}, {cmd_msg.linear.y}, {cmd_msg.linear.z}")
+        if self.joystick_msg is None:
+            return
+        
+        # 1) Get current xArm pose
+        curr_pose = self.servo_state.tolist()
+        curr_pose = np.array(curr_pose)
+        curr_euler = curr_pose[3:] 
+        curr_quat = Rotation.from_euler('xyz', curr_euler, degrees=True)
 
-        self.mode_publisher.publish(mode_msg)
-        self.get_logger().info(f"Published Correction Mode: {mode_msg.data}")
+        # 2) Get cartesian input from the SpaceMouse
+        scale_linear = 140.0
+        scale_angular = 40.0
+        vx, vy, vz, wx, wy, wz = self.latest_axes * np.array([scale_linear]*3 + [scale_angular]*3)
+
+        # 3. Calculate the rotation delta from SpaceMouse (in radians)
+        # angular_velocity * dt
+        delta_euler = np.array([wx, wy, wz]) * self.dt * (np.pi / 180.0)
+        delta_quat = Rotation.from_rotvec(delta_euler)
+             
+        # 4. Apply the delta (Matrix multiplication handles the rotation)
+        new_quat = delta_quat * curr_quat
+        new_euler = new_quat.as_euler('xyz', degrees=True)
+
+        new_xyz = curr_pose[:3] + np.array([vx, vy, vz]) * self.dt
+
+        # 5. Combine with new XYZ positions
+        cmd_manual_servo = np.concatenate([new_xyz, new_euler])
+
+        # 6) Convert the slider [0..1] to a gripper command (0 => 850, 1 => -10)
+        cmd_manual_gripper = 850 - 860 * self.gripper_position
+
+        # 7) Publish the gripper and servo commands
+        self.gripper_pub.publish(Float32(data=cmd_manual_gripper))
+        self.servo_pub.publish(Float32MultiArray(data=cmd_manual_servo))
+        self.get_logger().info(f"Published Manual Gripper Command: {cmd_manual_gripper}")
+        self.get_logger().info(f"Published Manual Servo Command: {cmd_manual_servo}")
+
+        # Final step: update GUI & remember button states
+        self.root.update()
+
+    def on_close(self):
+        self.root.quit()
+
+    def update_gripper(self, value):
+        self.gripper_position = float(value)
+
+    def on_left_key(self, event=None):
+        self.gripper_target = 0.0
+        self.auto_open = True
+
+    def on_right_key(self, event=None):
+        self.gripper_target = 0.79
+        self.auto_closing = True
+
 
 def main(args=None):
     rclpy.init(args=args)
