@@ -2,11 +2,13 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Bool
-from realsense import pyrealsense2 as rs
+import pyrealsense2 as rs
 #from robot_control.msg import MultiImage
 import numpy as np
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
+
+# Confirmed working :)
 
 class CameraNode(Node):
     def __init__(self):
