@@ -17,9 +17,9 @@ import numpy as np
 class InferenceNode(Node):
     def __init__(self):
         super().__init__('inference_node')
-        self.FPS_INFER = 60.0 # still finding upper limit on this
-        self.DT_INFER = 1.0 / self.FPS_INFER
-        self.CONTROL_HZ = 150.0 # multiple of 10
+        # self.FPS_INFER = 60.0 # still finding upper limit on this
+        # self.DT = 1.0 / self.FPS_INFER
+        # self.CONTROL_HZ = 150.0 # multiple of 10
         self.PREDICTION_HORIZON = 20
         self.MIN_EXECUTION_HORIZON = 10
         self.ROBOT_DOF = 7
@@ -32,6 +32,9 @@ class InferenceNode(Node):
             "/home/admin/openpi/checkpoints/pi05_xarm_finetune/clara_training1/25000"
         )
         self.policy = policy_config.create_trained_policy(config, checkpoint_dir)
+
+        # Master frequency subscription
+        self.frequency_sub = self.create_subscription(Float32, '/master_hz', self.frequency_callback, 10)
 
         # Camera Subscriptions
         self.wrist_sub = self.create_subscription(Image, '/camera_image/wrist', self.wrist_camera_callback, 10)
@@ -57,13 +60,46 @@ class InferenceNode(Node):
         self.gripper_state = None
         self.initialized = False
         self.observation_curr = None
+        # self.observation = {
+        #     "observation/exterior_image_1_left": None,
+        #     "observation/exterior_image_2_left": None,  # Placeholder for second exterior image
+        #     "observation/wrist_image_left": None,
+        #     "observation/gripper_position": None,
+        #     "observation/joint_position": None,
+        #     "prompt": "Pick up the bag and place it on the blue x",
+        # }
         self.action_curr = None
 
         print('I exist')
+    
+    def frequency_callback(self, msg):
+        self.MASTER_HZ = msg.data
+        self.DT = 1.0 / self.MASTER_HZ
+        self.get_logger().info(f"Received Master Frequency: {self.MASTER_HZ} Hz")
 
     def servo_state_callback(self, msg):
-        self.servo_state = np.array(msg.data, dtype=np.float32)
-        self.try_initialize()
+        servo_state = np.array(msg.data, dtype=np.float32)
+        pose = servo_state.tolist()
+        pose[3] = pose[3] % 360
+        pose[5] = pose[5] % 360
+
+        if not self.initialize_started:
+            self.try_initialize(pose)
+            return
+        if not self.initialized:
+            return
+    
+        observation = self.get_observation(pose)
+        command = self.get_action(observation)
+        cmd_joint_pose = command[:6].copy()
+        cmd_joint_pose[3:6] = cmd_joint_pose[3:6] / np.pi * 180
+        state = np.array(pose, dtype=np.float32)
+        self.interpolate_action(state, cmd_joint_pose)
+        cmd_gripper_pose = int((command[6]) * -860 + 850) # unnormalize the gripper action
+        
+        gripper_msg = Int32(data=cmd_gripper_pose)
+        self.gripper_pub.publish(gripper_msg)
+        self.get_logger().info(f"Gripper: {gripper_msg.data}")
 
     def gripper_state_callback(self, msg):
         self.gripper_state = msg.data
@@ -71,50 +107,33 @@ class InferenceNode(Node):
     def wrist_camera_callback(self, msg):
         bridge = CvBridge()
         self.wrist_camera = bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
+        # self.observation["observation/wrist_image_left"] = self.wrist_camera
 
     def tripod_camera_callback(self, msg):
         bridge = CvBridge()
         self.tripod_camera = bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
 
-    def try_initialize(self):
-        if (
-            not self.initialized and
-            self.servo_state is not None and
-            self.gripper_state is not None and
-            self.wrist_camera is not None and
-            self.tripod_camera is not None
-        ):
+    def try_initialize(self,pose):
+        if self.wrist_camera is not None and self.tripod_camera is not None:
+            self.initialize_started = True
             self.get_logger().info("Initial data received. Running first inference...")
 
-            self.observation_curr = self.get_observation()
+            self.observation_curr = self.get_observation(pose)
             self.action_curr = np.array(
                 self.policy.infer(self.observation_curr)["actions"],
                 dtype=np.float32
             )
 
             self.inference_loop_thread = Thread(target=self.inference_loop)
-            self.action_loop_thread = Thread(target=self.action_loop)
-
             self.inference_loop_thread.start()
-            self.action_loop_thread.start()
 
             self.initialized = True
-            self.get_logger().info("Inference and Action loops started.")
-        elif not self.initialized:
-            if self.servo_state is None or self.gripper_state is None:
-                self.get_logger().info("Waiting for servo and gripper state...")
-            if self.wrist_camera is None or self.tripod_camera is None:
-                self.get_logger().info("Waiting for camera images...")
+            self.get_logger().info("Inference loop started.")
         else:
-            if self.inference_loop_thread.is_alive() and self.action_loop_thread.is_alive():
-                self.get_logger().info("Inference and Action loops are running.")
-            else:
-                self.get_logger().warning("Inference or Action loop thread has stopped unexpectedly.")
+            self.get_logger().info("Waiting for camera images...")
 
-    def get_observation(self):
-        pose = self.servo_state.tolist()
-        pose[3] = pose[3] % 360
-        pose[5] = pose[5] % 360
+    def get_observation(self,pose):
+        
         angles_rad = (np.array(pose[3:6]) * np.pi / 180).tolist()
         state = np.array(pose[:3] + angles_rad, dtype=np.float32)
 
@@ -167,22 +186,14 @@ class InferenceNode(Node):
         return action_estimate[:H, :self.ROBOT_DOF]
     
     def interpolate_action(self, state, goal):
-        delta_increment = (goal - state) / (self.DT_INFER * self.CONTROL_HZ * 6)
+        command = goal.copy()
+        command[3] = (command[3]+ 180) % 360 -180
+        command[5] = (command[5]+ 180) % 360 -180
 
-        for i in range(int(self.DT_INFER * self.CONTROL_HZ)):
-            start_time = time.perf_counter()
-            state += delta_increment
-            command = state.copy()
-            command[3] = (command[3]+ 180) % 360 -180
-            command[5] = (command[5]+ 180) % 360 -180
-
-            self.cmd_servo = command
-            servo_msg = Float32MultiArray(data=command.tolist())
-            self.servo_pub.publish(servo_msg)
-            self.get_logger().info(f"Servo: {servo_msg.data}")
-
-            time_left = (1 / self.CONTROL_HZ) - (time.perf_counter() - start_time)
-            time.sleep(max(time_left,0))
+        self.cmd_servo = command
+        servo_msg = Float32MultiArray(data=command.tolist())
+        self.servo_pub.publish(servo_msg)
+        self.get_logger().info(f"Servo: {servo_msg.data}")
 
     def inference_loop(self):
         while True:
@@ -241,7 +252,7 @@ class InferenceNode(Node):
             self.gripper_pub.publish(gripper_msg)
             self.get_logger().info(f"Gripper: {gripper_msg.data}")
 
-            time_left = self.DT_INFER - (time.perf_counter() - t0)
+            time_left = self.DT - (time.perf_counter() - t0)
             self.get_logger().info(f"Time left: {time_left:.3f} seconds")
             time.sleep(max(time_left, 0))
             self.get_logger().info("Sleep time over")

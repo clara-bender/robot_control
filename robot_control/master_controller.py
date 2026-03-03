@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, Int32, Float32MultiArray
+from std_msgs.msg import Bool, Float32, Int32, Float32MultiArray
 from xarm.wrapper import XArmAPI
 import time
 import numpy as np
@@ -9,8 +9,10 @@ class MasterController(Node):
     def __init__(self):
         super().__init__('master_controller')
 
-        MASTER_HZ = 30.0
-        self.get_logger().info(f'Master Controller initialized, running at {MASTER_HZ} Hz')
+        self.MASTER_HZ = 30.0
+        self.frequency_pub = self.create_publisher(Float32, '/master_frequency', 10)
+        self.frequency_pub.publish(Float32(data=self.MASTER_HZ))
+        self.get_logger().info(f'Master Controller initialized, running at {self.MASTER_HZ} Hz')
 
         # Start up XArm
         self.arm = XArmAPI("192.168.1.222")
@@ -24,10 +26,8 @@ class MasterController(Node):
         self.arm.set_mode(1)
         self.arm.set_state(0)
         time.sleep(2.0)
+        self.get_logger().info('XArm connected and initialized.')
 
-        gripper_position = self.arm.get_gripper_position()[1]
-        print(f"Gripper position: {gripper_position}")
-        
         # Subscriber: gui.py start button
         self.start_sub = self.create_subscription(Bool,'/start_button',self.start_callback,10)
 
@@ -56,32 +56,39 @@ class MasterController(Node):
         self.current_manual_gripper_cmd = None
         self.current_manual_servo_cmd = None
         self.mode = 'auto'  # start in auto mode
+        self.collecting = False
 
-        # Timer loop for sending commands to the robot
-        self.timer_state = self.create_timer(1.0/MASTER_HZ, self.publish_state)
+        
 
     def start_callback(self, msg):
         if msg.data:
             self.get_logger().info('Received start signal, beginning control loop.')
+            self.timer_state = self.create_timer(1.0/self.MASTER_HZ, self.publish_state)
         else:
             self.get_logger().info('Received stop signal, halting control loop.')
-            self.start_collection_pub.publish(Bool(data=False))
-        self.start = msg.data
+            self.timer_state.cancel()
    
-
     def manual_gripper_callback(self, msg):
-        self.current_manual_gripper_cmd = msg
+        if self.mode == 'manual':
+            self.arm.set_gripper_position(int(msg.data), wait=True)
+            if not self.collecting:
+                self.start_collection_pub.publish(Bool(data=True))
+                self.collecting = True
 
     def manual_servo_callback(self, msg):
         if self.mode == 'manual':
             self.arm.set_servo_cartesian(np.array(msg.data, dtype=np.float32), speed=300, mvacc=2000)
+            if not self.collecting:
+                self.start_collection_pub.publish(Bool(data=True))
+                self.collecting = True
 
     def auto_gripper_callback(self, msg):
-        self.current_auto_gripper_cmd = msg
+        if self.mode == 'auto':
+            self.arm.set_gripper_position(int(msg.data), wait=True)
 
     def auto_servo_callback(self, msg):
-        self.current_auto_servo_cmd = msg
-        
+        if self.mode == 'auto':
+            self.arm.set_servo_cartesian(np.array(msg.data, dtype=np.float32), speed=300, mvacc=2000)
 
     def mode_callback(self, msg):
         self.mode = 'manual' if msg.data else 'auto'

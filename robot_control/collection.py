@@ -29,7 +29,7 @@ class CollectionNode(Node):
         self.failure_success_sub = self.create_subscription(Bool, '/failure_success_button', self.failure_success_callback, 10)
         
         # Scubscribers: master_controller.py, current robot state
-        self.servo_state_sub = self.create_subscription(Float32MultiArray, '/servo_state', self.servo_state_callback, 10)
+        self.servo_state_sub = self.create_subscription(Float32MultiArray, '/servo_state', self.collection_callback, 10)
         self.gripper_state_sub = self.create_subscription(Int32, '/gripper_state', self.gripper_state_callback, 10)
         
         # Subscribers: cameras.py, current camera images
@@ -96,7 +96,7 @@ class CollectionNode(Node):
             )
 
         # Collect data
-        self.timer = self.create_timer(self.DT_COLLECT, self.collection_callback)  # Run every 1 second
+        # self.timer = self.create_timer(self.DT_COLLECT, self.collection_callback)  # Run every 1 second
 
     def failure_success_callback(self, msg):
         self.failure = msg.data
@@ -134,7 +134,7 @@ class CollectionNode(Node):
             self.get_logger().info("Episode discarded, buffer cleared.")
             self.prev_data = None
 
-    def collection_callback(self):
+    def collection_callback(self,msg):
 
         if not self.start_collection:
             return
@@ -143,7 +143,8 @@ class CollectionNode(Node):
         
         # 1. Capture CURRENT state (Time t+1 relative to prev_data)
         #joints = arm.get_servo_angle(is_radian=True)[1][:6]
-        pose = self.servo_state.tolist()
+        servo_state = np.array(msg.data, dtype=np.float32)
+        pose = servo_state.tolist()
         pose[3] = pose[3] % 360
         pose[5] = pose[5] % 360
         # ensure roll and yaw are continuous, also make sure pitch doesn't exceed 90 deg

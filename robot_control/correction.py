@@ -13,12 +13,13 @@ class CorrectionNode(Node):
     def __init__(self):
         super().__init__('correction_node')
 
-        # Inputs
-        self.DT_CORRECT = 1.0/30.0
+        # Frequency subscription (set by master_controller.py)
+        self.frequency_sub = self.create_subscription(Float32, '/master_hz', self.frequency_callback, 10)
 
         # Joystick subscription
         self.joy_sub = self.create_subscription(Joy, 'spacenav/joy', self.joystick_callback, 10)
 
+        # State subscriptions
         self.servo_sub = self.create_subscription(Float32MultiArray, '/servo_state', self.servo_state_callback, 10)
         self.gripper_sub = self.create_subscription(Int32, '/gripper_state', self.gripper_state_callback, 10)
 
@@ -69,39 +70,23 @@ class CorrectionNode(Node):
         self.root.bind("<Right>", self.on_right_key)
         self.root.update()
 
-        # Simulate correction with a timer (for demo)
-        self.timer = self.create_timer(self.DT_CORRECT, self.correction_callback)
-        self.get_logger().info("CorrectionNode initialized, waiting for joystick input...")
+    def frequency_callback(self, msg):
+        self.MASTER_HZ = msg.data
+        self.DT = 1.0 / self.MASTER_HZ
+        self.get_logger().info(f"Received Master Frequency: {self.MASTER_HZ} Hz")
 
     def servo_state_callback(self, msg):
-        # Update gripper for up/down key presses
+        
         servo_state = np.array(msg.data, dtype=np.float32)
-        if self.auto_closing:
-            current_val = self.slider.get()
-            if current_val < self.gripper_target:
-                new_val = min(self.gripper_target, current_val + 0.02)
-                self.slider.set(new_val)
-                self.update_gripper(new_val)
-            else:
-                self.auto_closing = False
-
-        if self.auto_open:
-            current_val = self.slider.get()
-            if current_val > self.gripper_target:
-                new_val = max(self.gripper_target, current_val - 0.02)
-                self.slider.set(new_val)
-                self.update_gripper(new_val)
-            else:
-                self.auto_open = False
-
+        
         if self.joystick_msg is None:
             self.get_logger().info("Waiting for joystick input...")
             return
         
         # 1) Get current xArm pose
-        curr_pose = servo_state.tolist()
-        curr_pose = np.array(curr_pose)
-        curr_euler = curr_pose[3:] 
+        # curr_pose = servo_state.tolist()
+        # curr_pose = np.array(curr_pose)
+        curr_euler = servo_state[3:] 
         curr_quat = Rotation.from_euler('xyz', curr_euler, degrees=True)
 
         # 2) Get cartesian input from the SpaceMouse
@@ -111,32 +96,49 @@ class CorrectionNode(Node):
 
         # 3. Calculate the rotation delta from SpaceMouse (in radians)
         # angular_velocity * dt
-        delta_euler = np.array([wx, wy, wz]) * self.DT_CORRECT * (np.pi / 180.0)
+        delta_euler = np.array([wx, wy, wz]) * self.DT * (np.pi / 180.0)
         delta_quat = Rotation.from_rotvec(delta_euler)
              
         # 4. Apply the delta (Matrix multiplication handles the rotation)
         new_quat = delta_quat * curr_quat
         new_euler = new_quat.as_euler('xyz', degrees=True)
 
-        new_xyz = curr_pose[:3] + np.array([vx, vy, vz]) * self.DT_CORRECT
+        new_xyz = servo_state[:3] + np.array([vx, vy, vz]) * self.DT
 
         # 5. Combine with new XYZ positions
         cmd_manual_servo = np.concatenate([new_xyz, new_euler])
 
-        # 6) Convert the slider [0..1] to a gripper command (0 => 850, 1 => -10)
-        cmd_manual_gripper = int(850 - 860 * self.gripper_position)
-
         # 7) Publish the gripper and servo commands
-        self.gripper_pub.publish(Int32(data=cmd_manual_gripper))
         self.servo_pub.publish(Float32MultiArray(data=cmd_manual_servo))
-        self.get_logger().info(f"Published Manual Gripper Command: {cmd_manual_gripper}")
         self.get_logger().info(f"Published Manual Servo Command: {cmd_manual_servo}")
 
         # Final step: update GUI & remember button states
         self.root.update()
     
     def gripper_state_callback(self, msg):
-        self.gripper_state = int(msg.data)
+        # Update gripper for left/right keyboard presses
+        if self.auto_closing:
+            current_val = self.slider.get()
+            if current_val < self.gripper_target:
+                new_val = min(self.gripper_target, current_val + 0.02)
+                self.slider.set(new_val)
+                self.gripper_position = float(new_val)
+            else:
+                self.auto_closing = False
+
+        if self.auto_open:
+            current_val = self.slider.get()
+            if current_val > self.gripper_target:
+                new_val = max(self.gripper_target, current_val - 0.02)
+                self.slider.set(new_val)
+                self.gripper_position = float(new_val)
+            else:
+                self.auto_open = False
+
+        # 6) Convert the slider [0..1] to a gripper command (0 => 850, 1 => -10)
+        cmd_manual_gripper = int(850 - 860 * self.gripper_position)
+        self.gripper_pub.publish(Int32(data=cmd_manual_gripper))
+        self.get_logger().info(f"Published Manual Gripper Command: {cmd_manual_gripper}")
 
     def joystick_callback(self, msg: Joy):
         """
@@ -153,74 +155,6 @@ class CorrectionNode(Node):
         if right_button and self.manual_mode:
             self.manual_mode = False
             self.mode_pub.publish(Bool(data=False))
-
-    def correction_callback(self):
-
-        return
-
-        if self.servo_state is None or self.gripper_state is None:
-            self.get_logger().info("Waiting for servo and gripper state...")
-            return
-
-        # Update gripper for up/down key presses
-        if self.auto_closing:
-            current_val = self.slider.get()
-            if current_val < self.gripper_target:
-                new_val = min(self.gripper_target, current_val + 0.02)
-                self.slider.set(new_val)
-                self.update_gripper(new_val)
-            else:
-                self.auto_closing = False
-
-        if self.auto_open:
-            current_val = self.slider.get()
-            if current_val > self.gripper_target:
-                new_val = max(self.gripper_target, current_val - 0.02)
-                self.slider.set(new_val)
-                self.update_gripper(new_val)
-            else:
-                self.auto_open = False
-
-        if self.joystick_msg is None:
-            self.get_logger().info("Waiting for joystick input...")
-            return
-        
-        # 1) Get current xArm pose
-        curr_pose = self.servo_state.tolist()
-        curr_pose = np.array(curr_pose)
-        curr_euler = curr_pose[3:] 
-        curr_quat = Rotation.from_euler('xyz', curr_euler, degrees=True)
-
-        # 2) Get cartesian input from the SpaceMouse
-        scale_linear = 140.0
-        scale_angular = 40.0
-        vx, vy, vz, wx, wy, wz = self.latest_axes * np.array([scale_linear]*3 + [scale_angular]*3)
-
-        # 3. Calculate the rotation delta from SpaceMouse (in radians)
-        # angular_velocity * dt
-        delta_euler = np.array([wx, wy, wz]) * self.DT_CORRECT * (np.pi / 180.0)
-        delta_quat = Rotation.from_rotvec(delta_euler)
-             
-        # 4. Apply the delta (Matrix multiplication handles the rotation)
-        new_quat = delta_quat * curr_quat
-        new_euler = new_quat.as_euler('xyz', degrees=True)
-
-        new_xyz = curr_pose[:3] + np.array([vx, vy, vz]) * self.DT_CORRECT
-
-        # 5. Combine with new XYZ positions
-        cmd_manual_servo = np.concatenate([new_xyz, new_euler])
-
-        # 6) Convert the slider [0..1] to a gripper command (0 => 850, 1 => -10)
-        cmd_manual_gripper = int(850 - 860 * self.gripper_position)
-
-        # 7) Publish the gripper and servo commands
-        self.gripper_pub.publish(Int32(data=cmd_manual_gripper))
-        self.servo_pub.publish(Float32MultiArray(data=cmd_manual_servo))
-        self.get_logger().info(f"Published Manual Gripper Command: {cmd_manual_gripper}")
-        self.get_logger().info(f"Published Manual Servo Command: {cmd_manual_servo}")
-
-        # Final step: update GUI & remember button states
-        self.root.update()
 
     def on_close(self):
         self.root.quit()
