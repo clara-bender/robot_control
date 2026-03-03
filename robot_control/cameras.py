@@ -18,6 +18,7 @@ class CameraNode(Node):
         # =========================
         ctx = rs.context()
         devices = ctx.query_devices()
+        CAMERA_FPS = 80
 
         if len(devices) < 2:
             raise RuntimeError("Need at least two RealSense cameras connected")
@@ -42,7 +43,7 @@ class CameraNode(Node):
         self.tripod_pub = self.create_publisher(Image, '/camera_image/tripod', 10)
 
         # Simulate correction with a timer (for demo)
-        self.timer = self.create_timer(1.0, self.camera_callback)  # Run every 1 second
+        self.timer = self.create_timer(1.0 / CAMERA_FPS, self.camera_callback)  # Run every 1 second
 
     def camera_callback(self):
         # Get frames from both cameras, includes color, depth, infrared etc.

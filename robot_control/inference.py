@@ -6,7 +6,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32MultiArray
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Int32
 from sensor_msgs.msg import Image
 from openpi.policies import policy_config
 from openpi.shared import download
@@ -39,10 +39,10 @@ class InferenceNode(Node):
 
         # Robot state subscription
         self.servo_state_sub = self.create_subscription(Float32MultiArray, '/servo_state', self.servo_state_callback, 10)
-        self.gripper_state_sub = self.create_subscription(Float32, '/gripper_state', self.gripper_state_callback, 10)
+        self.gripper_state_sub = self.create_subscription(Int32, '/gripper_state', self.gripper_state_callback, 10)
 
         # Publisher to send commands
-        self.gripper_pub = self.create_publisher(Float32, '/cmd_auto_gripper', 10)
+        self.gripper_pub = self.create_publisher(Int32, '/cmd_auto_gripper', 10)
         self.servo_pub = self.create_publisher(Float32MultiArray, '/cmd_auto_servo', 10)
 
 
@@ -58,6 +58,8 @@ class InferenceNode(Node):
         self.initialized = False
         self.observation_curr = None
         self.action_curr = None
+
+        print('I exist')
 
     def servo_state_callback(self, msg):
         self.servo_state = np.array(msg.data, dtype=np.float32)
@@ -97,6 +99,17 @@ class InferenceNode(Node):
             self.action_loop_thread.start()
 
             self.initialized = True
+            self.get_logger().info("Inference and Action loops started.")
+        elif not self.initialized:
+            if self.servo_state is None or self.gripper_state is None:
+                self.get_logger().info("Waiting for servo and gripper state...")
+            if self.wrist_camera is None or self.tripod_camera is None:
+                self.get_logger().info("Waiting for camera images...")
+        else:
+            if self.inference_loop_thread.is_alive() and self.action_loop_thread.is_alive():
+                self.get_logger().info("Inference and Action loops are running.")
+            else:
+                self.get_logger().warning("Inference or Action loop thread has stopped unexpectedly.")
 
     def get_observation(self):
         pose = self.servo_state.tolist()
@@ -121,6 +134,7 @@ class InferenceNode(Node):
     
     def get_action(self, observation_next):
         with self.condition_variable:
+            self.get_logger().info("Getting action")
             self.t += 1
 
             self.observation_curr = observation_next
@@ -171,73 +185,66 @@ class InferenceNode(Node):
             time.sleep(max(time_left,0))
 
     def inference_loop(self):
+        while True:
+            Q = deque([self.DELAY_INIT], maxlen=self.BUFFER_SIZE)
 
-        Q = deque([self.DELAY_INIT], maxlen=self.BUFFER_SIZE)
+            with self.condition_variable:
+                    while self.t < self.MIN_EXECUTION_HORIZON:
+                        self.get_logger().info(f"Waiting for {self.MIN_EXECUTION_HORIZON - self.t} more steps before another inference...")
+                        self.condition_variable.wait()
 
-        with self.condition_variable:
-                while self.t < self.MIN_EXECUTION_HORIZON:
-                    self.condition_variable.wait()
+                    time_since_last_inference = self.t
+                    # Remove actions that have already been executed
+                    action_prev = self.action_curr[
+                        time_since_last_inference:self.PREDICTION_HORIZON
+                    ].copy() 
 
-                time_since_last_inference = self.t
-                # Remove actions that have already been executed
-                action_prev = self.action_curr[
-                    time_since_last_inference:self.PREDICTION_HORIZON
-                ].copy() 
+                    delay = max(Q)
+                    # print("Delay: ", delay)
+                    obs = self.observation_curr.copy()
 
-                delay = max(Q)
-                # print("Delay: ", delay)
-                obs = self.observation_curr.copy()
+            # ---- lock released ----
+            action_new = self.guided_inference(
+                obs,
+                action_prev,
+                delay,
+                time_since_last_inference
+            )
 
-        # ---- lock released ----
-        action_new = self.guided_inference(
-            obs,
-            action_prev,
-            delay,
-            time_since_last_inference
-        )
-
-        self.action_curr[:action_new.shape[0], :] = action_new
-        self.t = self.t - time_since_last_inference
-        Q.append(self.t)
+            self.action_curr[:action_new.shape[0], :] = action_new
+            self.t = self.t - time_since_last_inference
+            Q.append(self.t)
 
     def action_loop(self):
+        while True:
+            self.get_logger().info("Action loop going.")
 
-        t0 = time.perf_counter()
+            t0 = time.perf_counter()
 
-        observation = self.get_observation()
-        command = self.get_action(observation)
+            observation = self.get_observation()
+            self.get_logger().info("Observation obtained, running inference...")
+            command = self.get_action(observation)
 
-        cmd_joint_pose = command[:6].copy()
-        cmd_joint_pose[3:6] = cmd_joint_pose[3:6] / np.pi * 180
+            cmd_joint_pose = command[:6].copy()
+            cmd_joint_pose[3:6] = cmd_joint_pose[3:6] / np.pi * 180
 
-        pose = self.arm.get_position()[1]
-        pose[3] = pose[3] % 360
-        pose[5] = pose[5] % 360
-        state = np.array(pose, dtype=np.float32)
+            pose = self.servo_state.tolist()
+            pose[3] = pose[3] % 360
+            pose[5] = pose[5] % 360
+            state = np.array(pose, dtype=np.float32)
 
-        # execute smooth motion to target via interpolation
-        self.interpolate_action(state, cmd_joint_pose)
-        cmd_gripper_pose = (command[6]) * -860 + 850 # unnormalize the gripper action
-        
-        gripper_msg = Float32(data=cmd_gripper_pose)
-        self.gripper_pub.publish(gripper_msg)
-        self.get_logger().info(f"Gripper: {gripper_msg.data}")
+            # execute smooth motion to target via interpolation
+            self.interpolate_action(state, cmd_joint_pose)
+            cmd_gripper_pose = int((command[6]) * -860 + 850) # unnormalize the gripper action
+            
+            gripper_msg = Int32(data=cmd_gripper_pose)
+            self.gripper_pub.publish(gripper_msg)
+            self.get_logger().info(f"Gripper: {gripper_msg.data}")
 
-        time_left = self.DT_INFER - (time.perf_counter() - t0)
-        time.sleep(max(time_left, 0))
-
-
-        # Replace this with actual inference logic
-        msg = Twist()
-
-        # Example: Inference might output a velocity command
-        msg.linear.x = 0.5  # Simulated output from inference model
-        msg.linear.y = 0.0
-        msg.linear.z = 0.0
-
-        # Publish the command
-        self.publisher.publish(msg)
-        self.get_logger().info(f"Published Inference Command: {msg.linear.x}, {msg.linear.y}, {msg.linear.z}")
+            time_left = self.DT_INFER - (time.perf_counter() - t0)
+            self.get_logger().info(f"Time left: {time_left:.3f} seconds")
+            time.sleep(max(time_left, 0))
+            self.get_logger().info("Sleep time over")
 
 def main(args=None):
     rclpy.init(args=args)
