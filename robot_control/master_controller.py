@@ -67,6 +67,21 @@ class MasterController(Node):
         else:
             self.get_logger().info('Received stop signal, halting control loop.')
             self.timer_state.cancel()
+            self.go_home()
+
+    def go_home(self):
+            self.arm.motion_enable(enable=True)
+            self.arm.set_mode(0)
+            self.arm.set_gripper_enable(enable=True)
+            self.arm.set_gripper_mode(0)
+            self.arm.set_state(0)
+            cmd_joint_pose = [0.0, -90.4, -24.0, 0.0, 61.3, 180.0] 
+            cmd_gripper_pose = 850.0
+            self.arm.set_servo_angle(servo_id=8, angle=cmd_joint_pose, is_radian=False, wait=True) 
+            self.arm.set_gripper_position(cmd_gripper_pose, wait=True)
+            self.arm.motion_enable(enable=True)
+            self.arm.set_mode(1)
+            self.arm.set_state(0)
    
     def manual_gripper_callback(self, msg):
         if self.mode == 'manual':
