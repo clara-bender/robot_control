@@ -25,6 +25,7 @@ class InferenceNode(Node):
         self.ROBOT_DOF = 7
         self.DELAY_INIT = 5
         self.BUFFER_SIZE = 5
+        self.initialize_started = False
         
         # Load the trained policy
         config = _config.get_config("pi05_xarm_finetune")
@@ -103,6 +104,7 @@ class InferenceNode(Node):
 
     def gripper_state_callback(self, msg):
         self.gripper_state = msg.data
+        self.get_logger().info(f"Gripper state updated: {self.gripper_state}")
 
     def wrist_camera_callback(self, msg):
         bridge = CvBridge()

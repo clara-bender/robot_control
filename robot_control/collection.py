@@ -103,9 +103,7 @@ class CollectionNode(Node):
     
     def start_collection_callback(self, msg):
         self.start_collection = msg.data
-
-    def servo_state_callback(self, msg):
-        self.servo_state = msg.data
+        self.get_logger().info(f"Start collection signal received: {self.start_collection}")
 
     def gripper_state_callback(self, msg):
         self.gripper_state = msg.data
