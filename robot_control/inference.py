@@ -35,7 +35,7 @@ class InferenceNode(Node):
         self.policy = policy_config.create_trained_policy(config, checkpoint_dir)
 
         # Master frequency subscription
-        self.frequency_sub = self.create_subscription(Float32, '/master_hz', self.frequency_callback, 10)
+        self.frequency_sub = self.create_subscription(Float32, '/master_frequency', self.frequency_callback, 10)
 
         # Camera Subscriptions
         self.wrist_sub = self.create_subscription(Image, '/camera_image/wrist', self.wrist_camera_callback, 10)
@@ -58,17 +58,9 @@ class InferenceNode(Node):
         self.wrist_camera = None
         self.tripod_camera = None
         self.servo_state = None
-        self.gripper_state = None
+        self.gripper_state = 840.0
         self.initialized = False
         self.observation_curr = None
-        # self.observation = {
-        #     "observation/exterior_image_1_left": None,
-        #     "observation/exterior_image_2_left": None,  # Placeholder for second exterior image
-        #     "observation/wrist_image_left": None,
-        #     "observation/gripper_position": None,
-        #     "observation/joint_position": None,
-        #     "prompt": "Pick up the bag and place it on the blue x",
-        # }
         self.action_curr = None
 
         print('I exist')
@@ -103,7 +95,7 @@ class InferenceNode(Node):
         self.get_logger().info(f"Gripper: {gripper_msg.data}")
 
     def gripper_state_callback(self, msg):
-        self.gripper_state = msg.data
+        self.gripper_state = float(msg.data)
         self.get_logger().info(f"Gripper state updated: {self.gripper_state}")
 
     def wrist_camera_callback(self, msg):
@@ -140,6 +132,7 @@ class InferenceNode(Node):
         state = np.array(pose[:3] + angles_rad, dtype=np.float32)
 
         g_p = self.gripper_state
+        self.get_logger().info(f"Current gripper state: {g_p}")
         g_p = np.array((g_p - 850) / -860)
 
         observation = {

@@ -111,36 +111,9 @@ class CorrectionNode(Node):
         # 7) Publish the gripper and servo commands
         self.servo_pub.publish(Float32MultiArray(data=cmd_manual_servo))
         self.get_logger().info(f"Published Manual Servo Command: {cmd_manual_servo}")
-
-        if self.auto_closing:
-            current_val = self.slider.get()
-            if current_val < self.gripper_target:
-                new_val = min(self.gripper_target, current_val + 0.02)
-                self.slider.set(new_val)
-                self.gripper_position = float(new_val)
-            else:
-                self.auto_closing = False
-
-        if self.auto_open:
-            current_val = self.slider.get()
-            if current_val > self.gripper_target:
-                new_val = max(self.gripper_target, current_val - 0.02)
-                self.slider.set(new_val)
-                self.gripper_position = float(new_val)
-            else:
-                self.auto_open = False
-
-        # 6) Convert the slider [0..1] to a gripper command (0 => 850, 1 => -10)
-        cmd_manual_gripper = int(850 - 860 * self.gripper_position)
-        self.gripper_pub.publish(Int32(data=cmd_manual_gripper))
-        self.get_logger().info(f"Published Manual Gripper Command: {cmd_manual_gripper}")
-
-        # Final step: update GUI & remember button states
-        self.root.update()
     
     def gripper_state_callback(self, msg):
 
-        return
         # Update gripper for left/right keyboard presses
         if self.auto_closing:
             current_val = self.slider.get()
