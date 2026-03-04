@@ -13,6 +13,7 @@ from openpi.shared import download
 from openpi.training import config as _config
 from cv_bridge import CvBridge
 import numpy as np
+from scipy.interpolate import interp1d
 
 class InferenceNode(Node):
     def __init__(self):
@@ -25,6 +26,7 @@ class InferenceNode(Node):
         self.ROBOT_DOF = 7
         self.DELAY_INIT = 5
         self.BUFFER_SIZE = 5
+        self.INTERP_STEPS = 5
         self.initialize_started = False
         
         # Load the trained policy
@@ -62,6 +64,7 @@ class InferenceNode(Node):
         self.initialized = False
         self.observation_curr = None
         self.action_curr = None
+        self.action_interp = None
 
         print('I exist')
     
@@ -118,6 +121,11 @@ class InferenceNode(Node):
                 dtype=np.float32
             )
 
+            old_indices = np.linspace(0,1,self.action_curr.shape[0])
+            new_indices = np.linspace(0,1,self.INTERP_STEPS*self.action_curr.shape[0])
+            f = interp1d(old_indices, self.action_curr, axis=0, kind='cubic')
+            self.action_interp = f(new_indices)
+
             self.inference_loop_thread = Thread(target=self.inference_loop)
             self.inference_loop_thread.start()
 
@@ -154,7 +162,8 @@ class InferenceNode(Node):
             self.observation_curr = observation_next
             self.condition_variable.notify()
 
-            action = self.action_curr[self.t - 1, :].copy()
+            # action = self.action_curr[self.t - 1, :].copy()
+            action = self.action_interp[self.t - 1, :].copy()
 
         return action
     
@@ -172,11 +181,11 @@ class InferenceNode(Node):
         if T < H:
             action_prev = np.pad(action_prev, ((0, H - T), (0, 0)), mode='constant')
 
-        v_pi = np.array(self.policy.infer(observation)["actions"])
-        v_pi = v_pi[:H, :self.ROBOT_DOF]  # ensure correct shape
+        action_new = np.array(self.policy.infer(observation)["actions"])
+        action_new = action_new[:H, :self.ROBOT_DOF]  # ensure correct shape
 
         A = action_prev.copy()
-        action_estimate = A*W[:,None] + v_pi*(1-W[:, None])
+        action_estimate = A*W[:,None] + action_new*(1-W[:, None])
 
         return action_estimate[:H, :self.ROBOT_DOF]
     
@@ -195,7 +204,7 @@ class InferenceNode(Node):
             Q = deque([self.DELAY_INIT], maxlen=self.BUFFER_SIZE)
 
             with self.condition_variable:
-                    while self.t < self.MIN_EXECUTION_HORIZON:
+                    while self.t < self.MIN_EXECUTION_HORIZON*self.INTERP_STEPS:
                         self.get_logger().info(f"Waiting for {self.MIN_EXECUTION_HORIZON - self.t} more steps before another inference...")
                         self.condition_variable.wait()
 
@@ -218,6 +227,12 @@ class InferenceNode(Node):
             )
 
             self.action_curr[:action_new.shape[0], :] = action_new
+
+            old_indices = np.linspace(0,1,action_new.shape[0])
+            new_indices = np.linspace(0,1,self.INTERP_STEPS*action_new.shape[0])
+            f = interp1d(old_indices, self.action_curr[:action_new.shape[0], :], axis=0, kind='cubic')
+            self.action_interp = f(new_indices)
+
             self.t = self.t - time_since_last_inference
             Q.append(self.t)
 
