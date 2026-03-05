@@ -14,6 +14,8 @@ class MasterController(Node):
         # Start up XArm
         self.arm = XArmAPI("192.168.1.222")
         self.arm.connect()
+        self.get_logger().info('Connected to XArm, initializing...')
+
         if self.arm.get_state() != 0:
             self.arm.clean_error()
             time.sleep(0.5)
@@ -22,8 +24,6 @@ class MasterController(Node):
         self.arm.set_gripper_mode(0)
         self.arm.set_mode(1)
         self.arm.set_state(0)
-        time.sleep(2.0)
-        self.get_logger().info('XArm connected and initialized.')
 
         # Subscriber: gui.py start button
         self.start_sub = self.create_subscription(Bool,'/start_button',self.start_callback,10)
@@ -50,12 +50,9 @@ class MasterController(Node):
         self.frequency_pub = self.create_publisher(Float32, '/master_frequency', 10)
 
         # Initializations
-        self.mode = 'auto'  # start in auto mode
+        self.mode = 'auto'  # start in manual mode
         self.collecting = False
-
-        
-
-        
+        self.timer_state = None
 
     def start_callback(self, msg):
         if msg.data:
@@ -70,7 +67,8 @@ class MasterController(Node):
             
         else:
             self.get_logger().info('Received stop signal, halting control loop.')
-            self.timer_state.cancel()
+            if self.timer_state is not None:
+                self.timer_state.cancel()
             self.go_home()
 
     def go_home(self):
@@ -116,14 +114,22 @@ class MasterController(Node):
                 self.collecting = True
 
     def mode_callback(self, msg):
-        self.mode = 'manual' if msg.data else 'auto'
+        if msg.data:
+            time.sleep(1)
+            self.mode = 'manual'
+        else:
+            if self.timer_state is not None:
+                self.timer_state.cancel()
+                time.sleep(1)  # small delay to ensure timer is cancelled before starting a new one
+                self.timer_state = self.create_timer(1.0/self.MASTER_HZ, self.publish_state)
+            self.mode = 'auto'
         self.get_logger().info(f'Mode changed to: {self.mode}')
 
     def publish_state(self):
         servo_state_msg = Float32MultiArray(data=self.arm.get_position()[1])
         gripper_state_msg = Int32(data=self.arm.get_gripper_position()[1])
-        self.servo_state_pub.publish(servo_state_msg)
         self.gripper_state_pub.publish(gripper_state_msg)
+        self.servo_state_pub.publish(servo_state_msg)
         self.get_logger().info(f'Published servo state: {servo_state_msg.data}, gripper state: {gripper_state_msg.data}')
 
 def main(args=None):

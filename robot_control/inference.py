@@ -26,8 +26,7 @@ class InferenceNode(Node):
         self.ROBOT_DOF = 7
         self.DELAY_INIT = 5
         self.BUFFER_SIZE = 5
-        self.INTERP_STEPS = 5
-        
+        self.INTERP_STEPS = 2
         
         # Load the trained policy
         config = _config.get_config("pi05_xarm_finetune")
@@ -35,6 +34,23 @@ class InferenceNode(Node):
             "/home/admin/openpi/checkpoints/pi05_xarm_finetune/clara_training1/25000"
         )
         self.policy = policy_config.create_trained_policy(config, checkpoint_dir)
+
+        # Initializations
+        self.mutex = threading.Lock()
+        self.condition_variable = threading.Condition(self.mutex)
+        self.t = 0
+        self.time_since_last_inference = 0
+        self.wrist_camera = None
+        self.tripod_camera = None
+        self.servo_state = None
+        self.gripper_state = None
+        self.initialized = False
+        self.observation_curr = None
+        self.action_curr = None
+        self.action_interp = None
+        self.initialize_started = False
+        self.inference_loop_thread = None
+        
 
         # Master frequency subscription
         self.frequency_sub = self.create_subscription(Float32, '/master_frequency', self.frequency_callback, 10)
@@ -57,30 +73,18 @@ class InferenceNode(Node):
         self.gripper_pub = self.create_publisher(Int32, '/cmd_auto_gripper', 10)
         self.servo_pub = self.create_publisher(Float32MultiArray, '/cmd_auto_servo', 10)
 
-
-        # Initializations
-        self.mutex = threading.Lock()
-        self.condition_variable = threading.Condition(self.mutex)
-        self.t = 0
-        self.time_since_last_inference = 0
-        self.wrist_camera = None
-        self.tripod_camera = None
-        self.servo_state = None
-        self.gripper_state = 840.0
-        self.initialized = False
-        self.observation_curr = None
-        self.action_curr = None
-        self.action_interp = None
-        self.initialize_started = False
-
         print('I exist')
 
     def reset_callback(self, msg):
         manual_or_start = msg.data
+        if manual_or_start:
+            self.get_logger().info("Switched to manual mode or start button pressed.")
         if not manual_or_start: # if switching to auto mode or if stop button pressed, reset inference
             self.get_logger().info("Switched to auto mode. Inference reset.")
             self.initialize_started = False
             self.initialized = False
+            self.t = 0
+            self.time_since_last_inference = 0
     
     def frequency_callback(self, msg):
         self.MASTER_HZ = msg.data
@@ -94,6 +98,9 @@ class InferenceNode(Node):
         pose[5] = pose[5] % 360
 
         if not self.initialize_started:
+            if self.gripper_state is None:
+                self.get_logger().info("Waiting for gripper state...")
+                return
             self.try_initialize(pose)
             return
         if not self.initialized:
@@ -113,7 +120,7 @@ class InferenceNode(Node):
 
     def gripper_state_callback(self, msg):
         self.gripper_state = float(msg.data)
-        self.get_logger().info(f"Gripper state updated: {self.gripper_state}")
+        self.get_logger().info(f"Got gripper state: {self.gripper_state}")
 
     def wrist_camera_callback(self, msg):
         bridge = CvBridge()
@@ -140,8 +147,9 @@ class InferenceNode(Node):
             f = interp1d(old_indices, self.action_curr, axis=0, kind='cubic')
             self.action_interp = f(new_indices)
 
-            self.inference_loop_thread = Thread(target=self.inference_loop)
-            self.inference_loop_thread.start()
+            if not self.inference_loop_thread:
+                self.inference_loop_thread = Thread(target=self.inference_loop, daemon=True)
+                self.inference_loop_thread.start()
 
             self.initialized = True
             self.get_logger().info("Inference loop started.")

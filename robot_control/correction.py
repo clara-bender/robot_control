@@ -23,6 +23,9 @@ class CorrectionNode(Node):
         self.servo_sub = self.create_subscription(Float32MultiArray, '/servo_state', self.servo_state_callback, 10)
         self.gripper_sub = self.create_subscription(Int32, '/gripper_state', self.gripper_state_callback, 10)
 
+        # Subscriber: gui.py start button
+        self.start_sub = self.create_subscription(Bool,'/start_button',self.reset_callback,10)
+
         # Publisher to send commands to the arm
         self.gripper_pub = self.create_publisher(Int32, '/cmd_manual_gripper', 10)
         self.servo_pub = self.create_publisher(Float32MultiArray, '/cmd_manual_servo', 10)
@@ -69,6 +72,12 @@ class CorrectionNode(Node):
         self.root.bind("<Left>", self.on_left_key)
         self.root.bind("<Right>", self.on_right_key)
         self.root.update()
+
+    def reset_callback(self, msg):
+        start = msg.data
+        if start:
+            self.auto_closing = False
+            self.auto_open = False
 
     def frequency_callback(self, msg):
         self.MASTER_HZ = msg.data
@@ -168,7 +177,7 @@ class CorrectionNode(Node):
         self.auto_open = True
 
     def on_right_key(self, event=None):
-        self.gripper_target = 0.79
+        self.gripper_target = 0.94
         self.auto_closing = True
 
 
