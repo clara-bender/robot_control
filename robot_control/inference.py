@@ -5,7 +5,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Bool, Float32MultiArray
 from std_msgs.msg import Float32, Int32
 from sensor_msgs.msg import Image
 from openpi.policies import policy_config
@@ -27,7 +27,7 @@ class InferenceNode(Node):
         self.DELAY_INIT = 5
         self.BUFFER_SIZE = 5
         self.INTERP_STEPS = 5
-        self.initialize_started = False
+        
         
         # Load the trained policy
         config = _config.get_config("pi05_xarm_finetune")
@@ -47,6 +47,12 @@ class InferenceNode(Node):
         self.servo_state_sub = self.create_subscription(Float32MultiArray, '/servo_state', self.servo_state_callback, 10)
         self.gripper_state_sub = self.create_subscription(Int32, '/gripper_state', self.gripper_state_callback, 10)
 
+        # Subscriber: correction.py, mode toggle (left and right button), True for manual, False for auto
+        self.mode_sub = self.create_subscription(Bool,'/manual_mode',self.reset_callback,10)
+
+        # Subscriber: gui.py start button
+        self.start_sub = self.create_subscription(Bool,'/start_button',self.reset_callback,10)
+
         # Publisher to send commands
         self.gripper_pub = self.create_publisher(Int32, '/cmd_auto_gripper', 10)
         self.servo_pub = self.create_publisher(Float32MultiArray, '/cmd_auto_servo', 10)
@@ -65,8 +71,16 @@ class InferenceNode(Node):
         self.observation_curr = None
         self.action_curr = None
         self.action_interp = None
+        self.initialize_started = False
 
         print('I exist')
+
+    def reset_callback(self, msg):
+        manual_or_start = msg.data
+        if not manual_or_start: # if switching to auto mode or if stop button pressed, reset inference
+            self.get_logger().info("Switched to auto mode. Inference reset.")
+            self.initialize_started = False
+            self.initialized = False
     
     def frequency_callback(self, msg):
         self.MASTER_HZ = msg.data
