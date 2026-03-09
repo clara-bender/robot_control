@@ -18,7 +18,6 @@ class CameraNode(Node):
         # =========================
         ctx = rs.context()
         devices = ctx.query_devices()
-        CAMERA_FPS = 80
 
         if len(devices) < 2:
             raise RuntimeError("Need at least two RealSense cameras connected")
@@ -42,32 +41,32 @@ class CameraNode(Node):
         self.wrist_pub = self.create_publisher(Image, '/camera_image/wrist', 10)
         self.tripod_pub = self.create_publisher(Image, '/camera_image/tripod', 10)
 
-        # Simulate correction with a timer (for demo)
-        self.timer = self.create_timer(1.0 / CAMERA_FPS, self.camera_callback)  # Run every 1 second
+        self.publish_images()
 
-    def camera_callback(self):
-        # Get frames from both cameras, includes color, depth, infrared etc.
-        wrist_img = self.pipelines[1].wait_for_frames()
-        tripod_img = self.pipelines[0].wait_for_frames()
+    def publish_images(self):
+        while True:
+            # Get frames from both cameras, includes color, depth, infrared etc.
+            wrist_img = self.pipelines[1].wait_for_frames()
+            tripod_img = self.pipelines[0].wait_for_frames()
 
-        # Extract color frames
-        wrist_color = wrist_img.get_color_frame()
-        tripod_color = tripod_img.get_color_frame()
+            # Extract color frames
+            wrist_color = wrist_img.get_color_frame()
+            tripod_color = tripod_img.get_color_frame()
 
-        # Convert to numpy arrays
-        wrist_color_np = np.asanyarray(wrist_color.get_data())
-        tripod_color_np = np.asanyarray(tripod_color.get_data())
+            # Convert to numpy arrays
+            wrist_color_np = np.asanyarray(wrist_color.get_data())
+            tripod_color_np = np.asanyarray(tripod_color.get_data())
 
-        # Convert to ROS Image messages
-        bridge = CvBridge()
-        wrist_msg = bridge.cv2_to_imgmsg(wrist_color_np, encoding="rgb8")
-        tripod_msg = bridge.cv2_to_imgmsg(tripod_color_np, encoding="rgb8")
+            # Convert to ROS Image messages
+            bridge = CvBridge()
+            wrist_msg = bridge.cv2_to_imgmsg(wrist_color_np, encoding="rgb8")
+            tripod_msg = bridge.cv2_to_imgmsg(tripod_color_np, encoding="rgb8")
 
-        # Publish
-        self.tripod_pub.publish(tripod_msg)
-        self.get_logger().info(f"Published Camera Image from Tripod")
-        self.wrist_pub.publish(wrist_msg)
-        self.get_logger().info(f"Published Camera Image from Wrist")
+            # Publish
+            self.tripod_pub.publish(tripod_msg)
+            self.get_logger().info(f"Published Camera Image from Tripod")
+            self.wrist_pub.publish(wrist_msg)
+            self.get_logger().info(f"Published Camera Image from Wrist")
 
 
 def main(args=None):

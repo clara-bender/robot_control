@@ -1,7 +1,0 @@
-[console_scripts]
-cameras = robot_control.cameras:main
-collection = robot_control.collection:main
-correction = robot_control.correction:main
-gui = robot_control.gui:main
-inference = robot_control.inference:main
-master_controller = robot_control.master_controller:main
