@@ -9,7 +9,8 @@ from xarm.wrapper import XArmAPI
 import time
 import threading
 from collections import deque
-
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.common.constants import HF_LEROBOT_HOME
 from openpi.policies import policy_config
 from openpi.shared import download
 from openpi.training import config as _config
@@ -21,48 +22,57 @@ class InferenceNode(Node):
         # =========================
         # User inputs
         # =========================
-        self.FPS = 20.0 # still finding upper limit on this
+
+        self.XARM_IP = '192.168.1.222'
+
+        # Inference
+        self.CONFIG_NAME = "pi05_xarm_finetune"
+        self.CHECKPOINT_FOLDER = "/home/admin/openpi/checkpoints/pi05_xarm_finetune/clara_training1/25000"
+        self.FPS = 120.0 # still finding upper limit on this
         self.DT = 1.0 / self.FPS
         self.CONTROL_HZ = 140.0 # multiple of 10
         self.PREDICTION_HORIZON = 20
         self.MIN_EXECUTION_HORIZON = 10
+        self.DELAY_INIT = 5
+        self.BUFFER_SIZE = 5
         self.ROBOT_DOF = 7
 
-        mutex = threading.Lock()
-        self.condition_variable = threading.Condition(mutex)
-
-        self.delay_init = 5
-        self.buffer_size = 5
+        # Collection
+        self.REPO_NAME = "clara/inference_collection"
+        self.TASK_DESCRIPTION = "Pick up the bag and place it on the blue x"
 
         # =========================
-        # Shared State
+        # Variables
         # =========================
         self.t = 0
         self.start = False
         self.start_inference = False
         self.start_correction = False
+        self.start_collection = True
         self.manual_mode = False
         self.infer_thread = None
         self.exec_thread = None
+        self.collect_thread = None
         self.publish_state_thread = None
         self.execute = False
-
+        self.discard_data = False
+        self.frames_recorded = 0
+        self.failure = False
+        self.prev_data = None
+        mutex = threading.Lock()
+        self.condition_variable = threading.Condition(mutex)
 
         # =========================
         # Policy Setup
         # =========================
-        config = _config.get_config("pi05_xarm_finetune")
-        checkpoint_dir = download.maybe_download(
-            "/home/admin/openpi/checkpoints/pi05_xarm_finetune/clara_training1/25000"
-        )
-
+        config = _config.get_config(self.CONFIG_NAME)
+        checkpoint_dir = download.maybe_download(self.CHECKPOINT_FOLDER)
         self.policy = policy_config.create_trained_policy(config, checkpoint_dir)
-
 
         # =========================
         # XArm Setup
         # =========================
-        self.arm = XArmAPI('192.168.1.222')
+        self.arm = XArmAPI(self.XARM_IP)
 
         if self.arm.get_state() != 0:
             self.arm.clean_error()
@@ -75,7 +85,6 @@ class InferenceNode(Node):
         self.arm.set_gripper_mode(0)
 
         self.go_home()
-
 
         # =========================
         # RealSense Camera Setup
@@ -106,6 +115,57 @@ class InferenceNode(Node):
         #     self.configs.append(config_rs)
 
         # =========================
+        # Dataset Setup
+        # =========================
+
+        self.dataset_path = HF_LEROBOT_HOME / self.REPO_NAME
+
+        if self.dataset_path.exists(): 
+            self.dataset = LeRobotDataset(
+                root=self.dataset_path,
+                repo_id=self.REPO_NAME,
+            )
+            print("Adding to existing dataset, waiting for signal.")
+        else:
+            self.dataset = LeRobotDataset.create(
+                repo_id=self.REPO_NAME,
+                robot_type="xarm",
+                fps=self.FPS_COLLECT,
+                features={
+                    "exterior_image_1_left": {
+                        "dtype": "image",
+                        "shape": (480, 640, 3),
+                        "names": ["height", "width", "channel"],
+                    },
+                    "exterior_image_2_left": { # this one is not used, put it as zeros or something
+                        "dtype": "image",
+                        "shape": (480, 640, 3),
+                        "names": ["height", "width", "channel"],
+                    },
+                    "wrist_image_left": {
+                        "dtype": "image",
+                        "shape": (480, 640, 3),
+                        "names": ["height", "width", "channel"],
+                    },
+                    "joint_position": {
+                        "dtype": "float32",
+                        "shape": (6,),
+                        "names": ["joint_position"],
+                    },
+                    "gripper_position": {
+                        "dtype": "float32",
+                        "shape": (1,),
+                        "names": ["gripper_position"],
+                    },
+                    "actions": {
+                        "dtype": "float32",
+                        "shape": (7,),  # We will use joint *velocity* actions here (6D) + gripper position (1D)
+                        "names": ["actions"],
+                    },
+                },
+            )
+
+        # =========================
         # Subscriptions
         # =========================
         self.start_sub = self.create_subscription(Bool, 'start_button', self.start_callback, 10)
@@ -129,6 +189,13 @@ class InferenceNode(Node):
         self.servo_state_pub = self.create_publisher(Float32MultiArray, '/servo_state', 10)
         self.gripper_state_pub = self.create_publisher(Int32, '/gripper_state', 10)
 
+        # Subscribers: gui.py, save or discard data
+        self.save_sub = self.create_subscription(Bool, '/save_button', self.save_callback, 10)
+
+        # Subscribers: gui.py, failure or success signal
+        self.failure_success_sub = self.create_subscription(Bool, '/failure_success_button', self.failure_success_callback, 10)
+        
+
         # self.timer_state = self.create_timer(1/40, self.publish_state)  # 100Hz
         
 
@@ -139,13 +206,12 @@ class InferenceNode(Node):
     # =========================
     def start_callback(self, msg):
         self.start = msg.data
-        # if self.start:
-            
         if self.start and not self.manual_mode:
             self.start_inference = True
             self.start_infer()
         elif self.start and self.manual_mode:
             self.start_correction = True
+            self.start_collection = True
         else:
             self.start_inference = False
             self.start_correction = False
@@ -159,6 +225,8 @@ class InferenceNode(Node):
             self.arm.set_gripper_position(int(msg.data))
 
     def manual_servo_callback(self,msg):
+        if self.start_correction and self.start_collection:
+            self.get_observation()
         if self.execute and self.start_correction:
             self.arm.set_servo_cartesian(np.array(msg.data, dtype=np.float32), speed=100, mvacc=1000)
 
@@ -230,17 +298,44 @@ class InferenceNode(Node):
         img = bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
         self.exterior_camera = img
 
-    def servo_callback(self, msg):
-        with self.condition_variable:
-            self.servo_state = np.array(msg.data, dtype=np.float32)
+    def save_callback(self, msg):
+        save_data = msg.data
+        if save_data and self.prev_data is not None:
+            self.dataset.save_episode()
+            print(f"Episode saved with {self.frames_recorded} frames.")
+            self.frames_recorded = 0
+            self.prev_data = None
+        if not save_data and self.prev_data is not None:
+            # HARD RESET: clears the in-memory episode buffer
+            self.dataset = LeRobotDataset(root=self.dataset_path,repo_id=self.REPO_NAME,)
+            self.get_logger().info("Episode discarded, buffer cleared.")
+            self.prev_data = None
 
-    def gripper_callback(self, msg):
-        with self.condition_variable:
-            self.gripper_state = int(msg.data)
+
+    def discard_callback(self, msg):
+        discard_data = msg.data
+        if discard_data and self.prev_data is not None:
+            # HARD RESET: clears the in-memory episode buffer
+            self.dataset = LeRobotDataset(root=self.dataset_path,repo_id=self.REPO_NAME,)
+            self.get_logger().info("Episode discarded, buffer cleared.")
+            self.prev_data = None
+
+    def failure_success_callback(self, msg):
+        self.failure = msg.data
+
+    # def servo_callback(self, msg):
+    #     with self.condition_variable:
+    #         self.servo_state = np.array(msg.data, dtype=np.float32)
+
+    # def gripper_callback(self, msg):
+    #     with self.condition_variable:
+    #         self.gripper_state = int(msg.data)
     # =========================
     # Observation
     # =========================
-    def get_observation(self):
+    def get_observation(self,collect=False):
+        if self.collect_thread is not None:
+            self.collect_thread.join()
         # frames_wrist = self.pipelines[1].wait_for_frames()
         # frames_exterior = self.pipelines[0].wait_for_frames()
 
@@ -253,24 +348,22 @@ class InferenceNode(Node):
         a = self.wrist_camera
         b = self.exterior_camera
 
-        pose = self.arm.get_position()[1]
+        servo_pose = self.arm.get_position()[1]
         # with self.condition_variable:
         #     pose = self.servo_state.copy() # x,y,z,roll,pitch,yaw
         #     g_p = self.gripper_state
 
         # Convert [-180,180] to [0,360] degrees
-        pose[3] = pose[3] % 360
-        pose[5] = pose[5] % 360
+        servo_pose[3] = servo_pose[3] % 360
+        servo_pose[5] = servo_pose[5] % 360
 
-        angles_rad = (np.array(pose[3:6]) * np.pi / 180).tolist()
-        state = np.array(pose[:3] + angles_rad, dtype=np.float32)
-
-        # # Convert roll, pitch, yaw from degrees to radians
-        # angles_rad = (np.array(pose[3:6]) * np.pi / 180)
+        # Convert roll, pitch, yaw from degrees to radians
+        angles_rad = (np.array(servo_pose[3:6]) * np.pi / 180).tolist()
+        servo_state = np.array(servo_pose[:3] + angles_rad, dtype=np.float32)
 
         # # Combine back into state
         # state = np.concatenate((pose[0:3],angles_rad))
-        print("Observation state:", state)
+        print("Observation state:", servo_state)
 
         _, g_p = self.arm.get_gripper_position()
         g_p = np.array((g_p - 850) / -860)
@@ -279,11 +372,46 @@ class InferenceNode(Node):
             "observation/exterior_image_1_left": b,
             "observation/wrist_image_left": a,
             "observation/gripper_position": g_p,
-            "observation/joint_position": state,
-            "prompt": "Pick up the bag and place it on the blue x",
+            "observation/joint_position": servo_state,
+            "prompt": self.TASK_DESCRIPTION,
         }
 
+        if collect:
+            total_state = np.concatenate((servo_state,np.array([g_p],dtype=np.float32)))
+            self.collection(total_state)
+
         return observation
+    
+    def collection(self, total_state):
+        if self.start_collection:
+            if self.failure:
+                base2 = np.ones_like(self.exterior_camera) * 255
+            else:
+                base2 = np.zeros_like(self.exterior_camera)
+
+            
+
+            if self.prev_data is not None:
+                self.dataset.add_frame(
+                    {
+                        "joint_position": self.prev_data["joints"],
+                        "gripper_position": self.prev_data["gripper"],
+                        "actions": total_state,  # This is the "future" state reached
+                        "exterior_image_1_left": self.prev_data["base"],
+                        "exterior_image_2_left": self.prev_data["base2"],
+                        "wrist_image_left": self.prev_data["wrist"],
+                        "task": self.TASK_DESCRIPTION,
+                    }
+                )
+                self.frames_recorded += 1
+
+            self.prev_data = {
+                "joints": total_state[:6],
+                "gripper": total_state[-1:],
+                "wrist": self.wrist_camera,
+                "base": self.exterior_camera,
+                "base2": base2,
+            }
 
     # =========================
     # Command Interpolation
@@ -356,9 +484,11 @@ class InferenceNode(Node):
     # Inference Loop
     # =========================
     def inference_loop(self):
-        Q = deque([self.delay_init], maxlen=self.buffer_size)
+        Q = deque([self.DELAY_INIT], maxlen=self.BUFFER_SIZE)
 
         while self.start_inference:
+            self.get_observation(collect=True)
+            print("collected****************************************************************")
             with self.condition_variable:
                 while self.t < self.MIN_EXECUTION_HORIZON:
                     self.condition_variable.wait(timeout=0.5)
@@ -436,20 +566,6 @@ class InferenceNode(Node):
             time_left = self.DT - (time.perf_counter() - t0)
             time.sleep(max(time_left, 0))
         print("Execution loop terminated.")
-
-    # def go_home(self):
-    #     self.arm.motion_enable(enable=True)
-    #     self.arm.set_mode(0)
-    #     self.arm.set_gripper_enable(enable=True)
-    #     self.arm.set_gripper_mode(0)
-    #     self.arm.set_state(0)
-    #     cmd_joint_pose = [0.0, -90.4, -24.0, 0.0, 61.3, 180.0] 
-    #     cmd_gripper_pose = 850.0
-    #     self.arm.set_servo_angle(servo_id=8, angle=cmd_joint_pose, is_radian=False, wait=True) 
-    #     self.arm.set_gripper_position(cmd_gripper_pose, wait=True)
-    #     self.arm.motion_enable(enable=True)
-    #     self.arm.set_mode(1)
-    #     self.arm.set_state(0)
 
     def publish_state(self):
         while self.start and self.manual_mode:

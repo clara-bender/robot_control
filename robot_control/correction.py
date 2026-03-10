@@ -70,7 +70,7 @@ class CorrectionNode(Node):
         self.root.update()
 
         # Simulate correction with a timer (for demo)
-        self.timer = self.create_timer(1.0/20, self.correction_callback)  # Run every 1 second
+        self.timer = None
 
     def servo_state_callback(self, msg):
         print("servo callback called")
@@ -91,12 +91,19 @@ class CorrectionNode(Node):
 
         if left_button and not self.manual_mode:
             self.manual_mode = True
+            if self.timer is None:
+                self.timer = self.create_timer(1.0/20, self.correction_callback)
             self.mode_pub.publish(Bool(data=True))
         if right_button and self.manual_mode:
             self.manual_mode = False
             self.servo_state = None
             self.gripper_state = None
             self.mode_pub.publish(Bool(data=False))
+            if self.timer is not None:
+                self.timer.cancel()
+                self.timer = None
+                print("Cancelled timer")
+            
 
     def correction_callback(self):
 

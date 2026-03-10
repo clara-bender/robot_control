@@ -7,6 +7,7 @@ from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 from PIL import Image as PILImage
 from PIL import ImageTk
+from tkinter import messagebox
 
 # ROS 2 Node class
 class ButtonPublisher(Node):
@@ -15,20 +16,26 @@ class ButtonPublisher(Node):
         self.start_stop_pub = self.create_publisher(Bool, 'start_button', 10)
         self.failure_pub = self.create_publisher(Bool, 'failure_button', 10)
         self.execution_pub = self.create_publisher(Bool, 'execution_selection',10)
+        self.save_pub = self.create_publisher(Bool,'save_button',10)
         self.get_logger().info("Button Publisher Node Started!")
         self.bridge = CvBridge()
         self.current_wrist_image = None
         self.current_tripod_image = None
+        self.manual_mode = False
 
         # Camera Subscriptions
         self.wrist_sub = self.create_subscription(Image, 'camera_image/wrist', self.wrist_camera_callback, 10)
         self.tripod_sub = self.create_subscription(Image, 'camera_image/tripod', self.tripod_camera_callback, 10)
+        self.mode_sub = self.create_subscription(Bool,'/manual_mode',self.mode_callback,10)
 
     def publish_message(self, msg_data, publisher):
         msg = Bool()
         msg.data = msg_data
         publisher.publish(msg)
         self.get_logger().info(f"Publishing: {msg_data}")
+
+    def mode_callback(self,msg):
+        self.manual_mode = msg.data
 
     def wrist_camera_callback(self, msg):
         # Convert the incoming message to an OpenCV image using CvBridge
@@ -70,13 +77,17 @@ class MyWindow:
         )
         self.toggle.pack(pady=20)
 
+        # Label to display "correction" or "inference"
+        self.correction_label = tk.Label(self.window, text="inference", font=("Arial", 16, "bold"), fg="orange")
+        self.correction_label.pack(pady=10)
+
         # Label to display the image
         self.image_label1 = tk.Label(self.window)
         self.image_label2 = tk.Label(self.window)
         self.image_label1.pack(padx=10, pady=10)
         self.image_label2.pack(padx=10, pady=10)
 
-        # Start a separate thread to update the image
+        # Start a separate thread to update the image and text
         self.update_image_thread = Thread(target=self.update_image)
         self.update_image_thread.daemon = True
         self.update_image_thread.start()
@@ -90,6 +101,11 @@ class MyWindow:
         elif current_text == "Stop":
             self.ros_node.publish_message(False, self.ros_node.start_stop_pub)
             self.start_stop_button.config(text="Start")
+            answer = messagebox.askyesno(
+            "Save Episode",
+            "Would you like to save this episode?"
+        )
+            self.ros_node.publish_message(answer, self.ros_node.save_pub)
 
     def failure_button_clicked(self):
         self.ros_node.publish_message(True, self.ros_node.failure_pub)
@@ -114,6 +130,37 @@ class MyWindow:
                 # Update the label with the new image
                 self.image_label2.config(image=tk_image)
                 self.image_label2.image = tk_image  # Keep a reference to avoid garbage collection
+
+            if self.ros_node.manual_mode:
+                # If manual_mode is True, display green bold "correction"
+                self.correction_label.config(
+                    text="correction",  # Text to display
+                    fg="green",          # Green color
+                    font=("Arial", 16, "bold")  # Bold font with size 16
+                )
+            else:
+                # If manual_mode is False, display orange bold "inference"
+                self.correction_label.config(
+                    text="inference",  # Text to display
+                    fg="orange",       # Orange color
+                    font=("Arial", 16, "bold")  # Bold font with size 16
+                )
+
+    # def update_text(self):
+    #         if self.ros_node.manual_mode:
+    #             # If manual_mode is True, display green bold "correction"
+    #             self.correction_label.config(
+    #                 text="correction",  # Text to display
+    #                 fg="green",          # Green color
+    #                 font=("Arial", 16, "bold")  # Bold font with size 16
+    #             )
+    #         else:
+    #             # If manual_mode is False, display orange bold "inference"
+    #             self.correction_label.config(
+    #                 text="inference",  # Text to display
+    #                 fg="orange",       # Orange color
+    #                 font=("Arial", 16, "bold")  # Bold font with size 16
+    #             )
 
 
     def start(self):
