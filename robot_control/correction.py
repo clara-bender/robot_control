@@ -3,7 +3,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool, Float32, Float32MultiArray
+from std_msgs.msg import Bool, Float32, Float32MultiArray, Int32
 from sensor_msgs.msg import Joy
 import numpy as np
 import tkinter as tk
@@ -18,14 +18,15 @@ class CorrectionNode(Node):
 
         # State subscriptions
         self.servo_sub = self.create_subscription(Float32MultiArray, '/servo_state', self.servo_state_callback, 10)
-        self.gripper_sub = self.create_subscription(Float32, '/gripper_state', self.gripper_state_callback, 10)
+        self.gripper_sub = self.create_subscription(Int32, '/gripper_state', self.gripper_state_callback, 10)
 
         # Subscriber: gui.py start button
-        self.start_sub = self.create_subscription(Bool,'/start_button',self.reset_callback,10)
+        # self.start_sub = self.create_subscription(Bool,'/start_button',self.correction_callback,10)
 
         # Publisher to send commands to the arm
         self.gripper_pub = self.create_publisher(Float32, '/cmd_manual_gripper', 10)
         self.servo_pub = self.create_publisher(Float32MultiArray, '/cmd_manual_servo', 10)
+        self.mode_pub = self.create_publisher(Bool, '/manual_mode',10)
 
         # Initializations
         self.joystick_msg = None
@@ -69,13 +70,15 @@ class CorrectionNode(Node):
         self.root.update()
 
         # Simulate correction with a timer (for demo)
-        self.timer = self.create_timer(1.0, self.correction_callback)  # Run every 1 second
+        self.timer = self.create_timer(1.0/20, self.correction_callback)  # Run every 1 second
 
     def servo_state_callback(self, msg):
+        print("servo callback called")
         self.servo_state = np.array(msg.data, dtype=np.float32)
     
     def gripper_state_callback(self, msg):
-        self.gripper_state = msg.data
+        print("gripper callback called")
+        self.gripper_state = int(msg.data)
 
     def joystick_callback(self, msg: Joy):
         """
@@ -88,12 +91,19 @@ class CorrectionNode(Node):
 
         if left_button and not self.manual_mode:
             self.manual_mode = True
+            self.mode_pub.publish(Bool(data=True))
         if right_button and self.manual_mode:
             self.manual_mode = False
+            self.servo_state = None
+            self.gripper_state = None
+            self.mode_pub.publish(Bool(data=False))
 
     def correction_callback(self):
 
-        if self.servo_state is None or self.gripper_state is None:
+        if self.servo_state is None:
+            print("Not getting servo state")
+            if  self.gripper_state is None:
+                print("Not getting gripper state")
             return
 
         # Update gripper for up/down key presses
@@ -116,6 +126,7 @@ class CorrectionNode(Node):
                 self.auto_open = False
 
         if self.joystick_msg is None:
+            print("Waiting for joystick message")
             return
         
         # 1) Get current xArm pose

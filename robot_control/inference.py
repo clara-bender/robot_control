@@ -44,6 +44,7 @@ class InferenceNode(Node):
         self.manual_mode = False
         self.infer_thread = None
         self.exec_thread = None
+        self.publish_state_thread = None
         self.execute = False
 
 
@@ -116,8 +117,12 @@ class InferenceNode(Node):
         # Subscriber: gui.py execution selection
         self.execution_sub = self.create_subscription(Bool, '/execution_selection',self.execution_callback,10)
 
+        # Subscriber: correction.py, "manual" commands
+        self.manual_gripper_sub = self.create_subscription(Int32,'/cmd_manual_gripper',self.manual_gripper_callback,10)
+        self.manual_servo_sub = self.create_subscription(Float32MultiArray,'/cmd_manual_servo',self.manual_servo_callback,10)
+
         # Subscriber: correction.py, mode toggle (left and right button), True for manual, False for auto
-        # self.mode_sub = self.create_subscription(Bool,'/manual_mode',self.mode_callback,10)
+        self.mode_sub = self.create_subscription(Bool,'/manual_mode',self.mode_callback,10)
         # self.auto_servo_pub = self.create_publisher(Float32MultiArray, '/cmd_auto_servo', 10)
         # self.auto_gripper_pub = self.create_publisher(Int32, '/cmd_auto_gripper', 10)
         # Publisher: Current robot state
@@ -125,8 +130,7 @@ class InferenceNode(Node):
         self.gripper_state_pub = self.create_publisher(Int32, '/gripper_state', 10)
 
         # self.timer_state = self.create_timer(1/40, self.publish_state)  # 100Hz
-        self.publish_state_thread = threading.Thread(target=self.publish_state, daemon=True)
-        self.publish_state_thread.start()
+        
 
         print("Ready to go!")
 
@@ -135,6 +139,8 @@ class InferenceNode(Node):
     # =========================
     def start_callback(self, msg):
         self.start = msg.data
+        # if self.start:
+            
         if self.start and not self.manual_mode:
             self.start_inference = True
             self.start_infer()
@@ -144,7 +150,18 @@ class InferenceNode(Node):
             self.start_inference = False
             self.start_correction = False
             self.stop_infer()
+            if self.publish_state_thread is not None:
+                self.publish_state_thread.join()
             self.go_home()
+
+    def manual_gripper_callback(self,msg):
+        if self.execute and self.start_correction:
+            self.arm.set_gripper_position(int(msg.data))
+
+    def manual_servo_callback(self,msg):
+        if self.execute and self.start_correction:
+            self.arm.set_servo_cartesian(np.array(msg.data, dtype=np.float32), speed=100, mvacc=1000)
+
 
     def start_infer(self):
         if self.wrist_camera is None or self.exterior_camera is None:
@@ -169,6 +186,8 @@ class InferenceNode(Node):
 
             self.infer_thread.start()
             self.exec_thread.start()
+
+            
     
     def stop_infer(self):
         print("Stopping inference")
@@ -192,9 +211,12 @@ class InferenceNode(Node):
         if self.manual_mode:
             self.start_inference = False
             self.stop_infer()
+            self.publish_state_thread = threading.Thread(target=self.publish_state, daemon=True)
+            self.publish_state_thread.start()
             self.start_correction = True
         if not self.manual_mode:
             self.start_correction = False
+            self.publish_state_thread.join()
             self.start_inference = True
             self.start_infer()
 
@@ -342,6 +364,8 @@ class InferenceNode(Node):
                     self.condition_variable.wait(timeout=0.5)
                     if not self.start:
                         break
+                    if self.manual_mode:
+                        break
 
                 time_since_last_inference = self.t
                 # Remove actions that have already been executed
@@ -428,12 +452,13 @@ class InferenceNode(Node):
     #     self.arm.set_state(0)
 
     def publish_state(self):
-        # print(self.arm.get_position()[1])
-        with self.condition_variable:
-            servo_state_msg = Float32MultiArray(data=self.arm.get_position()[1])
-        gripper_state_msg = Int32(data=0)
-        self.gripper_state_pub.publish(gripper_state_msg)
-        self.servo_state_pub.publish(servo_state_msg)
+        while self.start and self.manual_mode:
+            # print(self.arm.get_position()[1])
+                servo_state_msg = Float32MultiArray(data=self.arm.get_position()[1])
+                gripper_state_msg = Int32(data=0)
+                self.gripper_state_pub.publish(gripper_state_msg)
+                self.servo_state_pub.publish(servo_state_msg)
+        print("Publishing loop terminated")
 
     def go_home(self):
         self.arm.motion_enable(enable=True)
