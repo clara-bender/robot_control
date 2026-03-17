@@ -32,7 +32,7 @@ class CameraNode(Node):
             pipeline = rs.pipeline()
             config_rs = rs.config()
             config_rs.enable_device(serial)
-            config_rs.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 30)
+            config_rs.enable_stream(rs.stream.color, 320, 240, rs.format.rgb8, 30)
             pipeline.start(config_rs)
             self.pipelines.append(pipeline)
             self.configs.append(config_rs)

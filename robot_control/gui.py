@@ -108,7 +108,13 @@ class MyWindow:
             self.ros_node.publish_message(answer, self.ros_node.save_pub)
 
     def failure_button_clicked(self):
-        self.ros_node.publish_message(True, self.ros_node.failure_pub)
+        current_text = self.failure_button.cget("text")
+        if current_text == "Failure":
+            self.ros_node.publish_message(True, self.ros_node.failure_pub)
+            self.failure_button.config(text="Success")
+        elif current_text == "Success":
+            self.ros_node.publish_message(False, self.ros_node.failure_pub)
+            self.failure_button.config(text="Failure")
 
 
     def update_image(self):

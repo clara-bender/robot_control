@@ -74,11 +74,15 @@ class CorrectionNode(Node):
 
     def servo_state_callback(self, msg):
         print("servo callback called")
-        self.servo_state = np.array(msg.data, dtype=np.float32)
+        if self.manual_mode:
+            print("servo state saved")
+            self.servo_state = np.array(msg.data, dtype=np.float32)
     
     def gripper_state_callback(self, msg):
         print("gripper callback called")
-        self.gripper_state = int(msg.data)
+        if self.manual_mode:
+            print("gripper state saved")
+            self.gripper_state = int(msg.data)
 
     def joystick_callback(self, msg: Joy):
         """
@@ -96,12 +100,12 @@ class CorrectionNode(Node):
             self.mode_pub.publish(Bool(data=True))
         if right_button and self.manual_mode:
             self.manual_mode = False
-            self.servo_state = None
-            self.gripper_state = None
             self.mode_pub.publish(Bool(data=False))
             if self.timer is not None:
                 self.timer.cancel()
                 self.timer = None
+                self.servo_state = None
+                self.gripper_state = None
                 print("Cancelled timer")
             
 

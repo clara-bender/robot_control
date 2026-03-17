@@ -59,17 +59,17 @@ class CollectionNode(Node):
                 features={
                     "exterior_image_1_left": {
                         "dtype": "image",
-                        "shape": (480, 640, 3),
+                        "shape": (240, 320, 3),
                         "names": ["height", "width", "channel"],
                     },
                     "exterior_image_2_left": { # this one is not used, put it as zeros or something
                         "dtype": "image",
-                        "shape": (480, 640, 3),
+                        "shape": (240, 320, 3),
                         "names": ["height", "width", "channel"],
                     },
                     "wrist_image_left": {
                         "dtype": "image",
-                        "shape": (480, 640, 3),
+                        "shape": (240, 320, 3),
                         "names": ["height", "width", "channel"],
                     },
                     "joint_position": {

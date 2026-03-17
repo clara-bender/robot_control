@@ -27,10 +27,10 @@ class InferenceNode(Node):
 
         # Inference
         self.CONFIG_NAME = "pi05_xarm_finetune"
-        self.CHECKPOINT_FOLDER = "/home/admin/openpi/checkpoints/pi05_xarm_finetune/clara_training1/25000"
-        self.FPS = 120.0 # still finding upper limit on this
+        self.CHECKPOINT_FOLDER = "/home/admin/imdying/src/openpi/checkpoints/pi05_xarm_finetune/training3/25000"
+        self.FPS = 20.0 # still finding upper limit on this
         self.DT = 1.0 / self.FPS
-        self.CONTROL_HZ = 140.0 # multiple of 10
+        self.CONTROL_HZ = 40.0 # multiple of 10
         self.PREDICTION_HORIZON = 20
         self.MIN_EXECUTION_HORIZON = 10
         self.DELAY_INIT = 5
@@ -38,7 +38,7 @@ class InferenceNode(Node):
         self.ROBOT_DOF = 7
 
         # Collection
-        self.REPO_NAME = "clara/inference_collection"
+        self.REPO_NAME = "clara/with_corrections"
         self.TASK_DESCRIPTION = "Pick up the bag and place it on the blue x"
 
         # =========================
@@ -48,7 +48,7 @@ class InferenceNode(Node):
         self.start = False
         self.start_inference = False
         self.start_correction = False
-        self.start_collection = True
+        self.start_collection = False
         self.manual_mode = False
         self.infer_thread = None
         self.exec_thread = None
@@ -118,52 +118,53 @@ class InferenceNode(Node):
         # Dataset Setup
         # =========================
 
-        self.dataset_path = HF_LEROBOT_HOME / self.REPO_NAME
+        if self.start_collection:
+            self.dataset_path = HF_LEROBOT_HOME / self.REPO_NAME
 
-        if self.dataset_path.exists(): 
-            self.dataset = LeRobotDataset(
-                root=self.dataset_path,
-                repo_id=self.REPO_NAME,
-            )
-            print("Adding to existing dataset, waiting for signal.")
-        else:
-            self.dataset = LeRobotDataset.create(
-                repo_id=self.REPO_NAME,
-                robot_type="xarm",
-                fps=self.FPS_COLLECT,
-                features={
-                    "exterior_image_1_left": {
-                        "dtype": "image",
-                        "shape": (480, 640, 3),
-                        "names": ["height", "width", "channel"],
+            if self.dataset_path.exists(): 
+                self.dataset = LeRobotDataset(
+                    root=self.dataset_path,
+                    repo_id=self.REPO_NAME,
+                )
+                print("Adding to existing dataset, waiting for signal.")
+            else:
+                self.dataset = LeRobotDataset.create(
+                    repo_id=self.REPO_NAME,
+                    robot_type="xarm",
+                    fps=self.FPS_COLLECT,
+                    features={
+                        "exterior_image_1_left": {
+                            "dtype": "image",
+                            "shape": (240, 320, 3),
+                            "names": ["height", "width", "channel"],
+                        },
+                        "exterior_image_2_left": { # this one is not used, put it as zeros or something
+                            "dtype": "image",
+                            "shape": (240, 320, 3),
+                            "names": ["height", "width", "channel"],
+                        },
+                        "wrist_image_left": {
+                            "dtype": "image",
+                            "shape": (240, 320, 3),
+                            "names": ["height", "width", "channel"],
+                        },
+                        "joint_position": {
+                            "dtype": "float32",
+                            "shape": (6,),
+                            "names": ["joint_position"],
+                        },
+                        "gripper_position": {
+                            "dtype": "float32",
+                            "shape": (1,),
+                            "names": ["gripper_position"],
+                        },
+                        "actions": {
+                            "dtype": "float32",
+                            "shape": (7,),  # We will use joint *velocity* actions here (6D) + gripper position (1D)
+                            "names": ["actions"],
+                        },
                     },
-                    "exterior_image_2_left": { # this one is not used, put it as zeros or something
-                        "dtype": "image",
-                        "shape": (480, 640, 3),
-                        "names": ["height", "width", "channel"],
-                    },
-                    "wrist_image_left": {
-                        "dtype": "image",
-                        "shape": (480, 640, 3),
-                        "names": ["height", "width", "channel"],
-                    },
-                    "joint_position": {
-                        "dtype": "float32",
-                        "shape": (6,),
-                        "names": ["joint_position"],
-                    },
-                    "gripper_position": {
-                        "dtype": "float32",
-                        "shape": (1,),
-                        "names": ["gripper_position"],
-                    },
-                    "actions": {
-                        "dtype": "float32",
-                        "shape": (7,),  # We will use joint *velocity* actions here (6D) + gripper position (1D)
-                        "names": ["actions"],
-                    },
-                },
-            )
+                )
 
         # =========================
         # Subscriptions
@@ -211,7 +212,7 @@ class InferenceNode(Node):
             self.start_infer()
         elif self.start and self.manual_mode:
             self.start_correction = True
-            self.start_collection = True
+            # self.start_collection = True
         else:
             self.start_inference = False
             self.start_correction = False
@@ -246,6 +247,7 @@ class InferenceNode(Node):
         if self.infer_thread is None:
             print("Starting inference")
             self.t = 0
+            self.frames_recorded = 0
             self.observation_curr = self.get_observation()
             self.action_curr = np.array(self.policy.infer(self.observation_curr)["actions"], dtype=np.float32)
 
@@ -285,8 +287,9 @@ class InferenceNode(Node):
         if not self.manual_mode:
             self.start_correction = False
             self.publish_state_thread.join()
-            self.start_inference = True
-            self.start_infer()
+            if self.start:
+                self.start_inference = True
+                self.start_infer()
 
     def wrist_camera_callback(self, msg):
         bridge = CvBridge()
@@ -300,25 +303,27 @@ class InferenceNode(Node):
 
     def save_callback(self, msg):
         save_data = msg.data
-        if save_data and self.prev_data is not None:
-            self.dataset.save_episode()
-            print(f"Episode saved with {self.frames_recorded} frames.")
-            self.frames_recorded = 0
-            self.prev_data = None
-        if not save_data and self.prev_data is not None:
-            # HARD RESET: clears the in-memory episode buffer
-            self.dataset = LeRobotDataset(root=self.dataset_path,repo_id=self.REPO_NAME,)
-            self.get_logger().info("Episode discarded, buffer cleared.")
-            self.prev_data = None
+        print(f"Episode length: {self.frames_recorded} frames ********************************")
+        if self.start_collection:
+            if save_data and self.prev_data is not None:
+                self.dataset.save_episode()
+                print(f"Episode saved with {self.frames_recorded} frames.")
+                self.frames_recorded = 0
+                self.prev_data = None
+            if not save_data and self.prev_data is not None:
+                # HARD RESET: clears the in-memory episode buffer
+                self.dataset = LeRobotDataset(root=self.dataset_path,repo_id=self.REPO_NAME,)
+                self.get_logger().info("Episode discarded, buffer cleared.")
+                self.prev_data = None
 
 
-    def discard_callback(self, msg):
-        discard_data = msg.data
-        if discard_data and self.prev_data is not None:
-            # HARD RESET: clears the in-memory episode buffer
-            self.dataset = LeRobotDataset(root=self.dataset_path,repo_id=self.REPO_NAME,)
-            self.get_logger().info("Episode discarded, buffer cleared.")
-            self.prev_data = None
+    # def discard_callback(self, msg):
+    #     discard_data = msg.data
+    #     if discard_data and self.prev_data is not None:
+    #         # HARD RESET: clears the in-memory episode buffer
+    #         self.dataset = LeRobotDataset(root=self.dataset_path,repo_id=self.REPO_NAME,)
+    #         self.get_logger().info("Episode discarded, buffer cleared.")
+    #         self.prev_data = None
 
     def failure_success_callback(self, msg):
         self.failure = msg.data
@@ -334,8 +339,8 @@ class InferenceNode(Node):
     # Observation
     # =========================
     def get_observation(self,collect=False):
-        if self.collect_thread is not None:
-            self.collect_thread.join()
+        # if self.collect_thread is not None:
+        #     self.collect_thread.join()
         # frames_wrist = self.pipelines[1].wait_for_frames()
         # frames_exterior = self.pipelines[0].wait_for_frames()
 
@@ -383,13 +388,13 @@ class InferenceNode(Node):
         return observation
     
     def collection(self, total_state):
+        self.frames_recorded += 1
         if self.start_collection:
+
             if self.failure:
                 base2 = np.ones_like(self.exterior_camera) * 255
             else:
                 base2 = np.zeros_like(self.exterior_camera)
-
-            
 
             if self.prev_data is not None:
                 self.dataset.add_frame(
@@ -419,7 +424,7 @@ class InferenceNode(Node):
     def interpolate_action(self, state, goal):
         delta_increment = (goal - state) / (self.DT * self.CONTROL_HZ * 6)
 
-        for i in range(int(self.DT * self.CONTROL_HZ)):
+        for i in range(5):#int(self.DT * self.CONTROL_HZ)):
             start_time = time.perf_counter()
             state += delta_increment
             command = state.copy()
