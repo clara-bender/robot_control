@@ -27,19 +27,20 @@ class InferenceNode(Node):
 
         # Inference
         self.CONFIG_NAME = "pi05_xarm_finetune"
-        self.CHECKPOINT_FOLDER = "/home/admin/imdying/src/openpi/checkpoints/pi05_xarm_finetune/training3/25000"
-        self.FPS = 20.0 # still finding upper limit on this
+        self.CHECKPOINT_FOLDER = "/home/admin/imdying/src/openpi/checkpoints/pi05_xarm_finetune/clara_training1/25000"
+        self.FPS = 80.0 # still finding upper limit on this
         self.DT = 1.0 / self.FPS
-        self.CONTROL_HZ = 40.0 # multiple of 10
+        self.CONTROL_HZ = 100.0 # multiple of 10
         self.PREDICTION_HORIZON = 20
         self.MIN_EXECUTION_HORIZON = 10
         self.DELAY_INIT = 5
         self.BUFFER_SIZE = 5
         self.ROBOT_DOF = 7
+        self.FPS_COLLECT = 10
 
         # Collection
-        self.REPO_NAME = "clara/with_corrections"
-        self.TASK_DESCRIPTION = "Pick up the bag and place it on the blue x"
+        self.REPO_NAME = "clara/new"
+        self.TASK_DESCRIPTION = "Pick up the bag and place it in the center of the workspace."
 
         # =========================
         # Variables
@@ -48,11 +49,10 @@ class InferenceNode(Node):
         self.start = False
         self.start_inference = False
         self.start_correction = False
-        self.start_collection = False
+        self.start_collection = True
         self.manual_mode = False
         self.infer_thread = None
         self.exec_thread = None
-        self.collect_thread = None
         self.publish_state_thread = None
         self.execute = False
         self.discard_data = False
@@ -61,6 +61,11 @@ class InferenceNode(Node):
         self.prev_data = None
         mutex = threading.Lock()
         self.condition_variable = threading.Condition(mutex)
+        self.collect_loop = None
+        self.publish_observation_thread = None
+
+        self.manual_gripper = None
+        self.manual_servo = None
 
         # =========================
         # Policy Setup
@@ -211,25 +216,42 @@ class InferenceNode(Node):
             self.start_inference = True
             self.start_infer()
         elif self.start and self.manual_mode:
+            self.observation_curr = self.get_observation()
             self.start_correction = True
-            # self.start_collection = True
+            # if self.publish_observation_thread is None:
+            #     self.publish_observation_thread = threading.Thread(target=self.publish_observation, daemon=True)
+            #     self.publish_observation_thread.start()
+            if self.publish_state_thread is None:
+                self.publish_state_thread = threading.Thread(target=self.publish_state, daemon=True)
+                self.publish_state_thread.start()
+            # if self.collect_loop is None:
+            #     self.collect_loop = self.create_timer(1.0/self.FPS_COLLECT, self.collection_loop)
+            self.start_collection = True
         else:
+            if self.collect_loop is not None:
+                self.collect_loop.cancel()
+                self.collect_loop = None
             self.start_inference = False
             self.start_correction = False
             self.stop_infer()
             if self.publish_state_thread is not None:
                 self.publish_state_thread.join()
+                self.publish_state_thread = None
+            if self.publish_observation_thread is not None:
+                self.publish_observation_thread.join()
+                self.publish_observation_thread = None
             self.go_home()
 
     def manual_gripper_callback(self,msg):
         if self.execute and self.start_correction:
             self.arm.set_gripper_position(int(msg.data))
+            # self.manual_gripper = int(msg.data)
+            # print("Gripper callled")
 
     def manual_servo_callback(self,msg):
-        if self.start_correction and self.start_collection:
-            self.get_observation()
         if self.execute and self.start_correction:
             self.arm.set_servo_cartesian(np.array(msg.data, dtype=np.float32), speed=100, mvacc=1000)
+            # self.manual_servo = np.array(msg.data, dtype=np.float32)
 
 
     def start_infer(self):
@@ -253,6 +275,8 @@ class InferenceNode(Node):
 
             self.infer_thread = threading.Thread(target=self.inference_loop, daemon=True)
             self.exec_thread = threading.Thread(target=self.execution_loop, daemon=True)
+            if self.collect_loop is None:
+                self.collect_loop = self.create_timer(1.0/self.FPS_COLLECT, self.collection_loop)
 
             self.infer_thread.start()
             self.exec_thread.start()
@@ -267,6 +291,9 @@ class InferenceNode(Node):
         if self.exec_thread is not None:
             self.exec_thread.join()
             self.infer_thread = None
+        # if self.collect_loop is not None:
+        #     self.collect_loop.cancel()
+        #     self.collect_loop = None
 
     def execution_callback(self,msg):
         if msg.data:
@@ -281,12 +308,21 @@ class InferenceNode(Node):
         if self.manual_mode:
             self.start_inference = False
             self.stop_infer()
-            self.publish_state_thread = threading.Thread(target=self.publish_state, daemon=True)
-            self.publish_state_thread.start()
+            if self.publish_state_thread is None and self.start:
+                self.publish_state_thread = threading.Thread(target=self.publish_state, daemon=True)
+                self.publish_state_thread.start()
+            if self.publish_observation_thread is None and self.start:
+                self.publish_observation_thread = threading.Thread(target=self.publish_state, daemon=True)
+                self.publish_observation_thread.start()
             self.start_correction = True
         if not self.manual_mode:
             self.start_correction = False
-            self.publish_state_thread.join()
+            if self.publish_state_thread is not None:
+                self.publish_state_thread.join()
+                self.publish_state_thread = None
+            if self.publish_observation_thread is not None:
+                self.publish_observation_thread.join()
+                self.publish_observation_thread = None
             if self.start:
                 self.start_inference = True
                 self.start_infer()
@@ -381,20 +417,39 @@ class InferenceNode(Node):
             "prompt": self.TASK_DESCRIPTION,
         }
 
-        if collect:
-            total_state = np.concatenate((servo_state,np.array([g_p],dtype=np.float32)))
-            self.collection(total_state)
+        if self.start_correction:
+            if self.manual_servo is not None:
+                self.arm.set_servo_cartesian(self.manual_servo, speed=100, mvacc=1000)
+            if self.manual_gripper is not None:
+                self.arm.set_gripper_position(self.manual_gripper)
+            
+
+
+        # if collect:
+        #     total_state = np.concatenate((servo_state,np.array([g_p],dtype=np.float32)))
+        #     self.collection(total_state)
 
         return observation
     
-    def collection(self, total_state):
-        self.frames_recorded += 1
+    def collection_loop(self):
         if self.start_collection:
 
+            print("collllllllllllllllllllllllllllllected yayyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
+            # if self.start_correction:
+            #     self.observation_curr = self.get_observation()
+            
+            obs = self.observation_curr.copy()
+            tripod_camera = obs["observation/exterior_image_1_left"]
+            wrist_camera = obs["observation/wrist_image_left"]
+            gripper_pos = obs["observation/gripper_position"]
+            servo_state = obs["observation/joint_position"]
+
+            total_state = np.concatenate((servo_state,np.array([gripper_pos],dtype=np.float32)))
+
             if self.failure:
-                base2 = np.ones_like(self.exterior_camera) * 255
+                base2 = np.ones_like(tripod_camera) * 255
             else:
-                base2 = np.zeros_like(self.exterior_camera)
+                base2 = np.zeros_like(tripod_camera)
 
             if self.prev_data is not None:
                 self.dataset.add_frame(
@@ -413,8 +468,8 @@ class InferenceNode(Node):
             self.prev_data = {
                 "joints": total_state[:6],
                 "gripper": total_state[-1:],
-                "wrist": self.wrist_camera,
-                "base": self.exterior_camera,
+                "wrist": wrist_camera,
+                "base": tripod_camera,
                 "base2": base2,
             }
 
@@ -422,9 +477,9 @@ class InferenceNode(Node):
     # Command Interpolation
     # =========================
     def interpolate_action(self, state, goal):
-        delta_increment = (goal - state) / (self.DT * self.CONTROL_HZ * 6)
+        delta_increment = (goal - state) / (self.DT * self.CONTROL_HZ * 3)
 
-        for i in range(5):#int(self.DT * self.CONTROL_HZ)):
+        for i in range(int(self.DT * self.CONTROL_HZ)):
             start_time = time.perf_counter()
             state += delta_increment
             command = state.copy()
@@ -453,7 +508,6 @@ class InferenceNode(Node):
     def get_action(self, observation_next):
         with self.condition_variable:
             self.t += 1
-
             self.observation_curr = observation_next
             self.condition_variable.notify()
             action = self.action_curr[self.t - 1, :].copy()
@@ -490,10 +544,10 @@ class InferenceNode(Node):
     # =========================
     def inference_loop(self):
         Q = deque([self.DELAY_INIT], maxlen=self.BUFFER_SIZE)
+        last_collect_time = time.time()
 
         while self.start_inference:
-            self.get_observation(collect=True)
-            print("collected****************************************************************")
+            
             with self.condition_variable:
                 while self.t < self.MIN_EXECUTION_HORIZON:
                     self.condition_variable.wait(timeout=0.5)
@@ -580,6 +634,16 @@ class InferenceNode(Node):
                 self.gripper_state_pub.publish(gripper_state_msg)
                 self.servo_state_pub.publish(servo_state_msg)
         print("Publishing loop terminated")
+
+    # def publish_observation(self):
+    #     # time_last_obs = time.time()
+    #     while self.start and self.manual_mode and self.start_collection:
+    #         self.observation_curr = self.get_observation()
+    #         # time_since = time.time()-time_last_obs
+    #         # time_left = 1/(self.FPS_COLLECT*2) - time_since
+    #         # print("Time left: ", time_left)
+    #         # time.sleep(0.5)
+    #         # time_last_obs = time.time()
 
     def go_home(self):
         self.arm.motion_enable(enable=True)

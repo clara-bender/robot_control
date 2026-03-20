@@ -64,9 +64,9 @@ class CameraNode(Node):
 
             # Publish
             self.tripod_pub.publish(tripod_msg)
-            self.get_logger().info(f"Published Camera Image from Tripod")
+            print("Tripod camera shape: ",tripod_color_np.shape)
             self.wrist_pub.publish(wrist_msg)
-            self.get_logger().info(f"Published Camera Image from Wrist")
+            print("Wrist camera shape: ", wrist_color_np.shape)
 
 
 def main(args=None):

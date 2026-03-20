@@ -13,6 +13,8 @@ class CorrectionNode(Node):
     def __init__(self):
         super().__init__('correction_node')
 
+        self.FPS_COLLECT = 20
+
         # Joystick subscription
         self.joy_sub = self.create_subscription(Joy, 'spacenav/joy', self.joystick_callback, 10)
 
@@ -96,7 +98,7 @@ class CorrectionNode(Node):
         if left_button and not self.manual_mode:
             self.manual_mode = True
             if self.timer is None:
-                self.timer = self.create_timer(1.0/20, self.correction_callback)
+                self.timer = self.create_timer(1.0/self.FPS_COLLECT, self.correction_callback)
             self.mode_pub.publish(Bool(data=True))
         if right_button and self.manual_mode:
             self.manual_mode = False
