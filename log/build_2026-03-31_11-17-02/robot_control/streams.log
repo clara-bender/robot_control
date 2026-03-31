@@ -1,0 +1,40 @@
+[0.305s] Invoking command in '/home/admin/imdying/src/robot_control': PS1=(.venv) \[\e]0;\u@\h: \w\a\]${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ PYTHONPATH=/home/admin/imdying/src/robot_control/build/robot_control/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(.venv) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base build/robot_control build --build-base /home/admin/imdying/src/robot_control/build/robot_control/build install --record /home/admin/imdying/src/robot_control/build/robot_control/install.log --single-version-externally-managed install_data
+[0.382s] /home/admin/imdying/.venv/lib/python3.10/site-packages/setuptools/_distutils/dist.py:289: UserWarning: Unknown distribution option: 'tests_require'
+[0.382s]   warnings.warn(msg)
+[0.434s] running egg_info
+[0.442s] writing build/robot_control/robot_control.egg-info/PKG-INFO
+[0.443s] writing dependency_links to build/robot_control/robot_control.egg-info/dependency_links.txt
+[0.443s] writing entry points to build/robot_control/robot_control.egg-info/entry_points.txt
+[0.443s] writing requirements to build/robot_control/robot_control.egg-info/requires.txt
+[0.443s] writing top-level names to build/robot_control/robot_control.egg-info/top_level.txt
+[0.461s] reading manifest file 'build/robot_control/robot_control.egg-info/SOURCES.txt'
+[0.461s] writing manifest file 'build/robot_control/robot_control.egg-info/SOURCES.txt'
+[0.461s] running build
+[0.461s] running build_py
+[0.461s] copying robot_control/collection.py -> /home/admin/imdying/src/robot_control/build/robot_control/build/lib/robot_control
+[0.462s] copying robot_control/gui.py -> /home/admin/imdying/src/robot_control/build/robot_control/build/lib/robot_control
+[0.462s] copying robot_control/cameras.py -> /home/admin/imdying/src/robot_control/build/robot_control/build/lib/robot_control
+[0.462s] copying robot_control/test.py -> /home/admin/imdying/src/robot_control/build/robot_control/build/lib/robot_control
+[0.462s] copying robot_control/inference.py -> /home/admin/imdying/src/robot_control/build/robot_control/build/lib/robot_control
+[0.462s] copying robot_control/master_controller.py -> /home/admin/imdying/src/robot_control/build/robot_control/build/lib/robot_control
+[0.462s] copying robot_control/correction.py -> /home/admin/imdying/src/robot_control/build/robot_control/build/lib/robot_control
+[0.462s] copying robot_control/__init__.py -> /home/admin/imdying/src/robot_control/build/robot_control/build/lib/robot_control
+[0.462s] running install
+[0.464s] running install_lib
+[0.473s] copying /home/admin/imdying/src/robot_control/build/robot_control/build/lib/robot_control/inference.py -> /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control
+[0.473s] byte-compiling /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/inference.py to inference.cpython-310.pyc
+[0.475s] running install_data
+[0.475s] copying resource/robot_control -> /home/admin/imdying/src/robot_control/install/robot_control/share/ament_index/resource_index/packages
+[0.475s] copying package.xml -> /home/admin/imdying/src/robot_control/install/robot_control/share/robot_control
+[0.475s] running install_egg_info
+[0.484s] removing '/home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control-0.0.0-py3.10.egg-info' (and everything under it)
+[0.484s] Copying build/robot_control/robot_control.egg-info to /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control-0.0.0-py3.10.egg-info
+[0.484s] running install_scripts
+[0.503s] Installing cameras script to /home/admin/imdying/src/robot_control/install/robot_control/lib/robot_control
+[0.503s] Installing collection script to /home/admin/imdying/src/robot_control/install/robot_control/lib/robot_control
+[0.503s] Installing correction script to /home/admin/imdying/src/robot_control/install/robot_control/lib/robot_control
+[0.503s] Installing gui script to /home/admin/imdying/src/robot_control/install/robot_control/lib/robot_control
+[0.503s] Installing inference script to /home/admin/imdying/src/robot_control/install/robot_control/lib/robot_control
+[0.503s] Installing master_controller script to /home/admin/imdying/src/robot_control/install/robot_control/lib/robot_control
+[0.503s] writing list of installed files to '/home/admin/imdying/src/robot_control/build/robot_control/install.log'
+[0.513s] Invoked command in '/home/admin/imdying/src/robot_control' returned '0': PS1=(.venv) \[\e]0;\u@\h: \w\a\]${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ PYTHONPATH=/home/admin/imdying/src/robot_control/build/robot_control/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(.venv) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base build/robot_control build --build-base /home/admin/imdying/src/robot_control/build/robot_control/build install --record /home/admin/imdying/src/robot_control/build/robot_control/install.log --single-version-externally-managed install_data
