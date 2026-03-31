@@ -16,6 +16,7 @@ from openpi.policies import policy_config
 from openpi.shared import download
 from openpi.training import config as _config
 from scipy.spatial.transform import Rotation
+import tkinter as tk
 
 class InferenceNode(Node):
     def __init__(self):
@@ -40,6 +41,8 @@ class InferenceNode(Node):
         self.ROBOT_DOF = 7
         self.FPS_COLLECT = 10
 
+        self.FPS_CORRECT = 20
+
         # Collection
         self.REPO_NAME = "clara/new"
         self.TASK_DESCRIPTION = "Pick up the bag and place it in the center of the workspace."
@@ -51,7 +54,7 @@ class InferenceNode(Node):
         self.start = False
         self.start_inference = False
         self.start_correction = False
-        self.start_collection = False
+        self.start_collection = True
         self.manual_mode = False
         self.infer_thread = None
         self.exec_thread = None
@@ -80,6 +83,7 @@ class InferenceNode(Node):
         self.auto_closing = False
         self.auto_open = False
         self.dt = 1.0/self.FPS_CORRECT
+        self.correct_loop = None
 
                 # --- GUI for the gripper slider ---
         self.root = tk.Tk()
@@ -205,15 +209,8 @@ class InferenceNode(Node):
         # Subscriber: gui.py execution selection
         self.execution_sub = self.create_subscription(Bool, '/execution_selection',self.execution_callback,10)
 
-        # Subscriber: correction.py, "manual" commands
-        self.manual_gripper_sub = self.create_subscription(Int32,'/cmd_manual_gripper',self.manual_gripper_callback,10)
-        self.manual_servo_sub = self.create_subscription(Float32MultiArray,'/cmd_manual_servo',self.manual_servo_callback,10)
-
         # Joystick subscription
         self.joy_sub = self.create_subscription(Joy, 'spacenav/joy', self.joystick_callback, 10)
-
-        # Subscriber: correction.py, mode toggle (left and right button), True for manual, False for auto
-        self.mode_sub = self.create_subscription(Bool,'/manual_mode',self.mode_callback,10)
 
         # Subscribers: gui.py, save or discard data
         self.save_sub = self.create_subscription(Bool, '/save_button', self.save_callback, 10)
@@ -268,10 +265,10 @@ class InferenceNode(Node):
             self.manual_mode = True
             if self.timer is None:
                 self.timer = self.create_timer(1.0/self.FPS_CORRECT, self.correction_timer)
-            self.mode_pub.publish(Bool(data=True))
+            self.mode_callback(True)
         if right_button and self.manual_mode:
             self.manual_mode = False
-            self.mode_pub.publish(Bool(data=False))
+            self.mode_callback(False)
             if self.timer is not None:
                 self.timer.cancel()
                 self.timer = None
@@ -322,7 +319,7 @@ class InferenceNode(Node):
             self.execute = False
 
     def mode_callback(self,msg):
-        self.manual_mode = msg.data
+        self.manual_mode = msg
         if self.manual_mode:
             self.start_inference = False
             self.stop_infer()
@@ -364,8 +361,8 @@ class InferenceNode(Node):
                 self.prev_data = None
 
     def correction_timer(self):
-            if self.start_collection:
-                self.observation_curr = self.get_observation()
+            # if self.start_collection:
+            #     self.observation_curr = self.get_observation()
 
             # Update gripper for up/down key presses
             if self.auto_closing:

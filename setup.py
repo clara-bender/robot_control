@@ -26,6 +26,7 @@ setup(
             'collection = robot_control.collection:main',
             'gui = robot_control.gui:main',
             'cameras = robot_control.cameras:main',
+            'inference_correct = robot_control.inference_correct:main',
         ],
     },
 )
