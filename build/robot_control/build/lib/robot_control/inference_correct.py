@@ -1,21 +1,22 @@
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float32MultiArray, Int32, Float32
+from std_msgs.msg import Bool, Float32MultiArray, Int32
 import numpy as np
 import pyrealsense2 as rs
+from sensor_msgs.msg import Joy
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from xarm.wrapper import XArmAPI
 import time
 import threading
 from collections import deque
-from queue import Queue
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.common.constants import HF_LEROBOT_HOME
 from openpi.policies import policy_config
 from openpi.shared import download
 from openpi.training import config as _config
-import copy
+from scipy.spatial.transform import Rotation
+import tkinter as tk
 
 class InferenceNode(Node):
     def __init__(self):
@@ -40,6 +41,8 @@ class InferenceNode(Node):
         self.ROBOT_DOF = 7
         self.FPS_COLLECT = 10
 
+        self.FPS_CORRECT = 20
+
         # Collection
         self.REPO_NAME = "clara/new"
         self.TASK_DESCRIPTION = "Pick up the bag and place it in the center of the workspace."
@@ -51,7 +54,7 @@ class InferenceNode(Node):
         self.start = False
         self.start_inference = False
         self.start_correction = False
-        self.start_collection = False
+        self.start_collection = True
         self.manual_mode = False
         self.infer_thread = None
         self.exec_thread = None
@@ -69,8 +72,50 @@ class InferenceNode(Node):
         self.manual_gripper = None
         self.manual_servo = None
 
-        self.obs_queue = Queue()
-        self.reward_queue = Queue()
+        # Correction Initializations
+        self.joystick_msg = None
+        self.latest_axes = np.zeros(6)  # [vx, vy, vz, wx, wy, wz]
+        self.servo_state = None
+        self.gripper_state = None
+        self.gripper_position = 0.0
+        self.gripper_target = 0.0
+        self.manual_mode = False
+        self.auto_closing = False
+        self.auto_open = False
+        self.dt = 1.0/self.FPS_CORRECT
+        self.correct_loop = None
+
+                # --- GUI for the gripper slider ---
+        self.root = tk.Tk()
+        self.root.title("Gripper Control")
+        self.root.geometry("1500x300")  # Larger window
+        
+        self.slider = tk.Scale(
+            self.root,
+            from_=0, to=1,
+            resolution=0.01,
+            orient='horizontal',
+            label='Gripper Open/Close',
+            command=self.update_gripper,
+            length=1700,  # Longer slider
+            width=100,     # Thicker slider
+            font=('Arial', 16, 'bold'),  # Larger font
+            troughcolor='#E0E0E0',  # Light gray background
+            sliderlength=80  # Larger slider handle
+        )
+        self.slider.pack(fill=tk.X, expand=True, padx=20, pady=50)  # More padding
+        self.slider.set(0)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.gripper_position = 0.0
+
+        self.key_step = 0.04
+        self.root.focus_force()
+        self.root.bind("<Left>", self.on_left_key)
+        self.root.bind("<Right>", self.on_right_key)
+        self.root.update()
+
+        # Simulate correction with a timer (for demo)
+        # self.correct_loop = None
 
         # =========================
         # Policy Setup
@@ -101,80 +146,58 @@ class InferenceNode(Node):
         # =========================
         self.wrist_camera = None
         self.exterior_camera = None
-        # self.servo_state = None
-        # self.gripper_state = None
-        # ctx = rs.context()
-        # devices = ctx.query_devices()
-
-        # if len(devices) < 2:
-        #     raise RuntimeError("Need at least two RealSense cameras connected")
-
-        # serials = [dev.get_info(rs.camera_info.serial_number) for dev in devices]
-        # print("Found cameras:", serials)
-
-        # self.pipelines = []
-        # self.configs = []
-
-        # for serial in serials:
-        #     pipeline = rs.pipeline()
-        #     config_rs = rs.config()
-        #     config_rs.enable_device(serial)
-        #     config_rs.enable_stream(rs.stream.color, 320, 240, rs.format.rgb8, 30)
-        #     pipeline.start(config_rs)
-        #     self.pipelines.append(pipeline)
-        #     self.configs.append(config_rs)
 
         # =========================
         # Dataset Setup
         # =========================
 
-        # if self.start_collection:
-        self.dataset_path = HF_LEROBOT_HOME / self.REPO_NAME
+        if self.start_collection:
+            self.dataset_path = HF_LEROBOT_HOME / self.REPO_NAME
 
-        if self.dataset_path.exists(): 
-            self.dataset = LeRobotDataset(
-                root=self.dataset_path,
-                repo_id=self.REPO_NAME,
-            )
-            print("Adding to existing dataset, waiting for signal.")
-        else:
-            self.dataset = LeRobotDataset.create(
-                repo_id=self.REPO_NAME,
-                robot_type="xarm",
-                fps=self.FPS_COLLECT,
-                features={
-                    "exterior_image_1_left": {
-                        "dtype": "image",
-                        "shape": (240, 320, 3),
-                        "names": ["height", "width", "channel"],
+            if self.dataset_path.exists(): 
+                self.dataset = LeRobotDataset(
+                    root=self.dataset_path,
+                    repo_id=self.REPO_NAME,
+                )
+                print("Adding to existing dataset, waiting for signal.")
+            else:
+                self.dataset = LeRobotDataset.create(
+                    repo_id=self.REPO_NAME,
+                    robot_type="xarm",
+                    fps=self.FPS_COLLECT,
+                    features={
+                        "exterior_image_1_left": {
+                            "dtype": "image",
+                            "shape": (240, 320, 3),
+                            "names": ["height", "width", "channel"],
+                        },
+                        "exterior_image_2_left": { # this one is not used, put it as zeros or something
+                            "dtype": "image",
+                            "shape": (240, 320, 3),
+                            "names": ["height", "width", "channel"],
+                        },
+                        "wrist_image_left": {
+                            "dtype": "image",
+                            "shape": (240, 320, 3),
+                            "names": ["height", "width", "channel"],
+                        },
+                        "joint_position": {
+                            "dtype": "float32",
+                            "shape": (6,),
+                            "names": ["joint_position"],
+                        },
+                        "gripper_position": {
+                            "dtype": "float32",
+                            "shape": (1,),
+                            "names": ["gripper_position"],
+                        },
+                        "actions": {
+                            "dtype": "float32",
+                            "shape": (7,),  # We will use joint *velocity* actions here (6D) + gripper position (1D)
+                            "names": ["actions"],
+                        },
                     },
-                    "exterior_image_2_left": { # this one is not used, put it as zeros or something
-                        "dtype": "image",
-                        "shape": (240, 320, 3),
-                        "names": ["height", "width", "channel"],
-                    },
-                    "wrist_image_left": {
-                        "dtype": "image",
-                        "shape": (240, 320, 3),
-                        "names": ["height", "width", "channel"],
-                    },
-                    "joint_position": {
-                        "dtype": "float32",
-                        "shape": (6,),
-                        "names": ["joint_position"],
-                    },
-                    "gripper_position": {
-                        "dtype": "float32",
-                        "shape": (1,),
-                        "names": ["gripper_position"],
-                    },
-                    "actions": {
-                        "dtype": "float32",
-                        "shape": (7,),  # We will use joint *velocity* actions here (6D) + gripper position (1D)
-                        "names": ["actions"],
-                    },
-                },
-            )
+                )
 
         # =========================
         # Subscriptions
@@ -182,32 +205,18 @@ class InferenceNode(Node):
         self.start_sub = self.create_subscription(Bool, 'start_button', self.start_callback, 10)
         self.wrist_sub = self.create_subscription(Image, '/camera_image/wrist', self.wrist_camera_callback, 10)
         self.exterior_sub = self.create_subscription(Image, '/camera_image/tripod', self.exterior_camera_callback, 10)
-        # self.servo_sub = self.create_subscription(Float32MultiArray, '/servo_state', self.servo_callback, 10)
-        # self.gripper_sub = self.create_subscription(Int32, '/gripper_state', self.gripper_callback, 10)
-        
+
         # Subscriber: gui.py execution selection
         self.execution_sub = self.create_subscription(Bool, '/execution_selection',self.execution_callback,10)
 
-        # Subscriber: correction.py, "manual" commands
-        self.manual_gripper_sub = self.create_subscription(Float32,'/cmd_manual_gripper',self.manual_gripper_callback,10)
-        self.manual_servo_sub = self.create_subscription(Float32MultiArray,'/cmd_manual_servo',self.manual_servo_callback,10)
-
-        # Subscriber: correction.py, mode toggle (left and right button), True for manual, False for auto
-        self.mode_sub = self.create_subscription(Bool,'/manual_mode',self.mode_callback,10)
-        # self.auto_servo_pub = self.create_publisher(Float32MultiArray, '/cmd_auto_servo', 10)
-        # self.auto_gripper_pub = self.create_publisher(Int32, '/cmd_auto_gripper', 10)
-        # Publisher: Current robot state
-        self.servo_state_pub = self.create_publisher(Float32MultiArray, '/servo_state', 10)
-        self.gripper_state_pub = self.create_publisher(Float32, '/gripper_state', 10)
+        # Joystick subscription
+        self.joy_sub = self.create_subscription(Joy, 'spacenav/joy', self.joystick_callback, 10)
 
         # Subscribers: gui.py, save or discard data
         self.save_sub = self.create_subscription(Bool, '/save_button', self.save_callback, 10)
 
         # Subscribers: gui.py, failure or success signal
         self.failure_success_sub = self.create_subscription(Bool, '/failure_success_button', self.failure_success_callback, 10)
-        
-
-        # self.timer_state = self.create_timer(1/40, self.publish_state)  # 100Hz
         
 
         print("Ready to go!")
@@ -217,21 +226,21 @@ class InferenceNode(Node):
     # =========================
     def start_callback(self, msg):
         self.start = msg.data
-        if self.start and not self.manual_mode:
-            self.start_inference = True
-            self.start_infer()
-        elif self.start and self.manual_mode:
-            self.observation_curr = self.get_observation()
-            self.start_correction = True
-            # if self.publish_observation_thread is None:
-            #     self.publish_observation_thread = threading.Thread(target=self.publish_observation, daemon=True)
-            #     self.publish_observation_thread.start()
-            if self.publish_state_thread is None:
-                self.publish_state_thread = threading.Thread(target=self.publish_state, daemon=True)
-                self.publish_state_thread.start()
-            if self.collect_loop is None and self.start_collection:
-                self.collect_loop = self.create_timer(1.0/self.FPS_COLLECT, self.collection_loop)
-            # self.start_collection = True
+        if self.start:
+            if not self.manual_mode:
+                self.start_inference = True
+                self.start_infer()
+            elif self.manual_mode:
+                self.observation_curr = self.get_observation()
+                self.start_correction = True
+                if self.correct_loop is None:
+                    # self.correct_loop = self.create_timer(1.0/self.FPS_CORRECT, self.correction_timer)
+                    self.correct_loop = threading.Thread(target=self.correction_timer, daemon=True)
+                    self.correct_loop.start()
+                    print("Started correction thread")
+                if self.collect_loop is None and self.start_collection:
+                    self.collect_loop = self.create_timer(1.0/self.FPS_COLLECT, self.collection_timer)
+                    # self.collect_loop = threading.Thread(target=self.correction_timer, daemon=True)
         else:
             if self.collect_loop is not None:
                 self.collect_loop.cancel()
@@ -239,37 +248,27 @@ class InferenceNode(Node):
             self.start_inference = False
             self.start_correction = False
             self.stop_infer()
-            if self.publish_state_thread is not None:
-                self.publish_state_thread.join()
-                self.publish_state_thread = None
-            if self.publish_observation_thread is not None:
-                self.publish_observation_thread.join()
-                self.publish_observation_thread = None
+            if self.correct_loop is not None:
+                self.correct_loop.join()
+                self.correct_loop = None
+            if self.collect_loop is not None:
+                self.collect_loop.cancel()
+                self.collect_loop = None
             self.go_home()
 
-    def manual_gripper_callback(self,msg):
-        print("gripper called")
-        if self.execute and self.start_correction:
-            print("inside if statement")
-            self.arm.set_gripper_position(msg.data)
-            # self.manual_gripper = int(msg.data)
-            # print("Gripper callled")
+    def joystick_callback(self, msg: Joy):
+        """
+        Called by timer_callback
+        """
+        self.latest_axes = np.array(msg.axes[:6])  # [x, y, z, roll, pitch, yaw]
+        self.joystick_msg = msg
+        left_button = bool(msg.buttons[0])
+        right_button = bool(msg.buttons[1])
 
-    def manual_servo_callback(self,msg):
-        if self.start_correction:
-            time_start = time.time()
-            if self.execute:
-                self.arm.set_servo_cartesian(np.array(msg.data, dtype=np.float32), speed=100, mvacc=1000)
-            # self.manual_servo = np.array(msg.data, dtype=np.float32)
-            # if 1/(time_end-time_start) > 20:
-            # self.observation_curr = self.get_observation()
-            # self.collection_loop()
-            self.obs_queue.put(self.get_observation())
-            print("added obs")
-            self.reward_queue.put(self.failure)
-            time_end = time.time()
-            print(1/(time_end-time_start))
-
+        if left_button and not self.manual_mode:
+            self.mode_callback(True)
+        if right_button and self.manual_mode:
+            self.mode_callback(False)
 
     def start_infer(self):
         if self.wrist_camera is None or self.exterior_camera is None:
@@ -277,11 +276,6 @@ class InferenceNode(Node):
             while self.wrist_camera is None or self.exterior_camera is None:
                 time.sleep(0.5)
                 print("waiting for camera images...")
-        # if self.servo_state is None or self.gripper_state is None:
-        #     print("Waiting for robot state...")
-        #     while self.servo_state is None or self.gripper_state is None:
-        #         time.sleep(0.5)
-        #         print("waiting for robot state...")
 
         if self.infer_thread is None:
             print("Starting inference")
@@ -292,13 +286,11 @@ class InferenceNode(Node):
 
             self.infer_thread = threading.Thread(target=self.inference_loop, daemon=True)
             self.exec_thread = threading.Thread(target=self.execution_loop, daemon=True)
+
             if self.collect_loop is None:
-                self.collect_loop = self.create_timer(1.0/self.FPS_COLLECT, self.collection_loop)
-
+                self.collect_loop = self.create_timer(1.0/self.FPS_COLLECT, self.collection_timer)
             self.infer_thread.start()
-            self.exec_thread.start()
-
-            
+            self.exec_thread.start()         
     
     def stop_infer(self):
         print("Stopping inference")
@@ -321,25 +313,20 @@ class InferenceNode(Node):
             self.execute = False
 
     def mode_callback(self,msg):
-        self.manual_mode = msg.data
+        self.manual_mode = msg
         if self.manual_mode:
             self.start_inference = False
             self.stop_infer()
-            if self.publish_state_thread is None and self.start:
-                self.publish_state_thread = threading.Thread(target=self.publish_state, daemon=True)
-                self.publish_state_thread.start()
-            if self.publish_observation_thread is None and self.start:
-                self.publish_observation_thread = threading.Thread(target=self.publish_state, daemon=True)
-                self.publish_observation_thread.start()
             self.start_correction = True
+            if self.correct_loop is None and self.start:
+                # self.correct_loop = self.create_timer(1.0/self.FPS_CORRECT, self.correction_timer)
+                self.correct_loop = threading.Thread(target=self.correction_timer, daemon=True)
+                self.correct_loop.start()
         if not self.manual_mode:
             self.start_correction = False
-            if self.publish_state_thread is not None:
-                self.publish_state_thread.join()
-                self.publish_state_thread = None
-            if self.publish_observation_thread is not None:
-                self.publish_observation_thread.join()
-                self.publish_observation_thread = None
+            if self.correct_loop is not None:
+                self.correct_loop.join()
+                self.correct_loop = None
             if self.start:
                 self.start_inference = True
                 self.start_infer()
@@ -356,43 +343,115 @@ class InferenceNode(Node):
 
     def save_callback(self, msg):
         save_data = msg.data
-        print(f"Episode length: {self.obs_queue.qsize()} frames ********************************")
-        # if self.start_collection:
-        if save_data:# and self.prev_data is not None:
-            self.collection_loop()
-            self.dataset.save_episode()
-            print(f"Episode saved with {self.frames_recorded} frames.")
-            self.frames_recorded = 0
-            self.prev_data = None
-        if not save_data:# and self.prev_data is not None:
-            # HARD RESET: clears the in-memory episode buffer
-            # self.dataset = LeRobotDataset(root=self.dataset_path,repo_id=self.REPO_NAME,)
-            while not self.obs_queue.empty():
-                self.obs_queue.get()
-            while not self.reward_queue.empty():
-                self.reward_queue.get()
-            self.get_logger().info("Episode discarded, buffer cleared.")
-            self.prev_data = None
+        print(f"Episode length: {self.frames_recorded} frames ********************************")
+        if self.start_collection:
+            if save_data and self.prev_data is not None:
+                self.dataset.save_episode()
+                print(f"Episode saved with {self.frames_recorded} frames.")
+                self.frames_recorded = 0
+                self.prev_data = None
+            if not save_data and self.prev_data is not None:
+                # HARD RESET: clears the in-memory episode buffer
+                self.dataset = LeRobotDataset(root=self.dataset_path,repo_id=self.REPO_NAME,)
+                self.get_logger().info("Episode discarded, buffer cleared.")
+                self.prev_data = None
 
+    def correction_timer(self):
+        if not self.start_correction:
+            return
+        
+        t0 = time.perf_counter()
+        print("inside correction")
+        if self.start_collection:
+            self.observation_curr = self.get_observation()
 
-    # def discard_callback(self, msg):
-    #     discard_data = msg.data
-    #     if discard_data and self.prev_data is not None:
-    #         # HARD RESET: clears the in-memory episode buffer
-    #         self.dataset = LeRobotDataset(root=self.dataset_path,repo_id=self.REPO_NAME,)
-    #         self.get_logger().info("Episode discarded, buffer cleared.")
-    #         self.prev_data = None
+        # Update gripper for up/down key presses
+        if self.auto_closing:
+            current_val = self.slider.get()
+            if current_val < self.gripper_target:
+                new_val = min(self.gripper_target, current_val + 0.02)
+                self.slider.set(new_val)
+                self.update_gripper(new_val)
+            else:
+                self.auto_closing = False
+
+        if self.auto_open:
+            current_val = self.slider.get()
+            if current_val > self.gripper_target:
+                new_val = max(self.gripper_target, current_val - 0.02)
+                self.slider.set(new_val)
+                self.update_gripper(new_val)
+            else:
+                self.auto_open = False
+
+        if self.joystick_msg is None:
+            print("Waiting for joystick message")
+            return
+        
+        # 1) Get current xArm pose
+        curr_pose = self.arm.get_position()[1].copy()
+        curr_pose = np.array(curr_pose)
+        curr_euler = curr_pose[3:] 
+        curr_quat = Rotation.from_euler('xyz', curr_euler, degrees=True)
+
+        # 2) Get cartesian input from the SpaceMouse
+        scale_linear = 140.0
+        scale_angular = 40.0
+        vx, vy, vz, wx, wy, wz = self.latest_axes * np.array([scale_linear]*3 + [scale_angular]*3)
+
+        # 3. Calculate the rotation delta from SpaceMouse (in radians)
+        # angular_velocity * dt
+        delta_euler = np.array([wx, wy, wz]) * self.dt * (np.pi / 180.0)
+        delta_quat = Rotation.from_rotvec(delta_euler)
+            
+        # 4. Apply the delta (Matrix multiplication handles the rotation)
+        new_quat = delta_quat * curr_quat
+        new_euler = new_quat.as_euler('xyz', degrees=True)
+
+        new_xyz = curr_pose[:3] + np.array([vx, vy, vz]) * self.dt
+
+        # 5. Combine with new XYZ positions
+        cmd_manual_servo = np.concatenate([new_xyz, new_euler])
+
+        # 6) Convert the slider [0..1] to a gripper command (0 => 850, 1 => -10)
+        cmd_manual_gripper = 850 - 860 * self.gripper_position
+
+        # 7) Publish the gripper and servo commands
+        # 8) Command the xArm
+        self.arm.set_servo_cartesian(cmd_manual_servo, speed=300, mvacc=2000)
+        self.arm.set_gripper_position(cmd_manual_gripper)
+
+        # Final step: update GUI & remember button states
+        # self.root.update()
+
+        tf = time.perf_counter()
+        # time.sleep(max(1/self.FPS_CORRECT - (tf-t0),0))
+
+        # ⏱️ Schedule next iteration
+
+        delay = max(int(1000/self.FPS_CORRECT - (tf - t0)*1000), 0)
+
+        self.root.after(delay, self.correction_timer)
+
+        # print("Correction loop terminated")
+
+    def on_close(self):
+        self.root.quit()
+
+    def update_gripper(self, value):
+        self.gripper_position = float(value)
+
+    def on_left_key(self, event=None):
+        self.gripper_target = 0.0
+        self.auto_open = True
+
+    def on_right_key(self, event=None):
+        self.gripper_target = 0.94
+        self.auto_closing = True
 
     def failure_success_callback(self, msg):
         self.failure = msg.data
 
-    # def servo_callback(self, msg):
-    #     with self.condition_variable:
-    #         self.servo_state = np.array(msg.data, dtype=np.float32)
-
-    # def gripper_callback(self, msg):
-    #     with self.condition_variable:
-    #         self.gripper_state = int(msg.data)
     # =========================
     # Observation
     # =========================
@@ -411,7 +470,7 @@ class InferenceNode(Node):
         a = self.wrist_camera
         b = self.exterior_camera
 
-        servo_pose = self.arm.get_position()[1]
+        servo_pose = self.arm.get_position()[1].copy()
         # with self.condition_variable:
         #     pose = self.servo_state.copy() # x,y,z,roll,pitch,yaw
         #     g_p = self.gripper_state
@@ -453,17 +512,14 @@ class InferenceNode(Node):
 
         return observation
     
-    def collection_loop(self):
-        # if self.start_collection:
+    def collection_timer(self):
+        if self.start_collection:
 
-            # print("collllllllllllllllllllllllllllllected yayyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
+            print("collllllllllllllllllllllllllllllected yayyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
             # if self.start_correction:
             #     self.observation_curr = self.get_observation()
-
-        while not self.obs_queue.empty():
             
-            # obs = copy.deepcopy(self.observation_curr)
-            obs = self.obs_queue.get()
+            obs = self.observation_curr.copy()
             tripod_camera = obs["observation/exterior_image_1_left"]
             wrist_camera = obs["observation/wrist_image_left"]
             gripper_pos = obs["observation/gripper_position"]
@@ -471,9 +527,7 @@ class InferenceNode(Node):
 
             total_state = np.concatenate((servo_state,np.array([gripper_pos],dtype=np.float32)))
 
-            reward = self.reward_queue.get()
-
-            if reward:
+            if self.failure:
                 base2 = np.ones_like(tripod_camera) * 255
             else:
                 base2 = np.zeros_like(tripod_camera)
@@ -618,16 +672,12 @@ class InferenceNode(Node):
             t0 = time.perf_counter()
 
             observation = self.get_observation()
-            self.obs_queue.put(observation)
-            print("added obs")
-            self.reward_queue.put(self.failure)
             command = self.get_action(observation)
+
             cmd_joint_pose = command[:6].copy()
             cmd_joint_pose[3:6] = cmd_joint_pose[3:6] / np.pi * 180
 
             pose = self.arm.get_position()[1]
-            # with self.condition_variable:
-            #     pose = self.servo_state.copy()
 
             # Convert [-180,180] to [0,360]
             pose[3] = pose[3] % 360
@@ -636,45 +686,16 @@ class InferenceNode(Node):
 
             print("Inference state:", state)
             print("Command pose:", cmd_joint_pose)
-            
-            # print("Current pose:")
-            # print(pose)
-            # print("Command pose:")
-            # print(cmd_joint_pose)
 
             # execute smooth motion to target via interpolation
             self.interpolate_action(state, cmd_joint_pose)
             cmd_gripper_pose = (command[6]) * -860 + 850 # unnormalize the gripper action
             if self.execute:
                 self.arm.set_gripper_position(cmd_gripper_pose)
-            # cmd_auto_gripper = Int32()
-            # cmd_auto_gripper.data = int(cmd_gripper_pose)
-            # self.auto_gripper_pub.publish(cmd_auto_gripper)
 
             time_left = self.DT - (time.perf_counter() - t0)
             time.sleep(max(time_left, 0))
         print("Execution loop terminated.")
-
-    def publish_state(self):
-        while self.start and self.manual_mode:
-            # print(self.arm.get_position()[1])
-                servo_state_msg = Float32MultiArray(data=self.arm.get_position()[1])
-                # gripper_state_msg = Float32(data=self.arm.get_gripper_position())
-                # self.gripper_state_pub.publish(gripper_state_msg)
-                self.servo_state_pub.publish(servo_state_msg)
-
-                # self.collection_loop()
-        print("Publishing loop terminated")
-
-    # def publish_observation(self):
-    #     # time_last_obs = time.time()
-    #     while self.start and self.manual_mode and self.start_collection:
-    #         self.observation_curr = self.get_observation()
-    #         # time_since = time.time()-time_last_obs
-    #         # time_left = 1/(self.FPS_COLLECT*2) - time_since
-    #         # print("Time left: ", time_left)
-    #         # time.sleep(0.5)
-    #         # time_last_obs = time.time()
 
     def go_home(self):
         self.arm.motion_enable(enable=True)

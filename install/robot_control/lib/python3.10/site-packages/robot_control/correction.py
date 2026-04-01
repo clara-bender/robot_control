@@ -75,15 +75,11 @@ class CorrectionNode(Node):
         self.timer = None
 
     def servo_state_callback(self, msg):
-        print("servo callback called")
         if self.manual_mode:
-            print("servo state saved")
             self.servo_state = np.array(msg.data, dtype=np.float32)
     
     def gripper_state_callback(self, msg):
-        print("gripper callback called")
         if self.manual_mode:
-            print("gripper state saved")
             self.gripper_state = int(msg.data)
 
     def joystick_callback(self, msg: Joy):
@@ -113,10 +109,11 @@ class CorrectionNode(Node):
 
     def correction_callback(self):
 
+        # if self.servo_state is None or self.gripper_state is None:
         if self.servo_state is None:
             print("Not getting servo state")
-            if  self.gripper_state is None:
-                print("Not getting gripper state")
+        # if  self.gripper_state is None:
+        #     print("Not getting gripper state")
             return
 
         # Update gripper for up/down key presses
@@ -126,6 +123,9 @@ class CorrectionNode(Node):
                 new_val = min(self.gripper_target, current_val + 0.02)
                 self.slider.set(new_val)
                 self.update_gripper(new_val)
+                cmd_manual_gripper = 850 - 860 * self.gripper_position
+                self.gripper_pub.publish(Float32(data=cmd_manual_gripper))
+                self.get_logger().info(f"Published Manual Gripper Command: {cmd_manual_gripper}")
             else:
                 self.auto_closing = False
 
@@ -135,6 +135,9 @@ class CorrectionNode(Node):
                 new_val = max(self.gripper_target, current_val - 0.02)
                 self.slider.set(new_val)
                 self.update_gripper(new_val)
+                cmd_manual_gripper = 850 - 860 * self.gripper_position
+                self.gripper_pub.publish(Float32(data=cmd_manual_gripper))
+                self.get_logger().info(f"Published Manual Gripper Command: {cmd_manual_gripper}")
             else:
                 self.auto_open = False
 
@@ -171,9 +174,9 @@ class CorrectionNode(Node):
         cmd_manual_gripper = 850 - 860 * self.gripper_position
 
         # 7) Publish the gripper and servo commands
-        self.gripper_pub.publish(Float32(data=cmd_manual_gripper))
+        # self.gripper_pub.publish(Float32(data=cmd_manual_gripper))
         self.servo_pub.publish(Float32MultiArray(data=cmd_manual_servo))
-        self.get_logger().info(f"Published Manual Gripper Command: {cmd_manual_gripper}")
+        # self.get_logger().info(f"Published Manual Gripper Command: {cmd_manual_gripper}")
         self.get_logger().info(f"Published Manual Servo Command: {cmd_manual_servo}")
 
         # Final step: update GUI & remember button states

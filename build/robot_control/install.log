@@ -6,6 +6,7 @@
 /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/master_controller.py
 /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/correction.py
 /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/__init__.py
+/home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/inference_correct.py
 /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/__pycache__/collection.cpython-310.pyc
 /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/__pycache__/gui.cpython-310.pyc
 /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/__pycache__/cameras.cpython-310.pyc
@@ -14,6 +15,7 @@
 /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/__pycache__/master_controller.cpython-310.pyc
 /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/__pycache__/correction.cpython-310.pyc
 /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/__pycache__/__init__.cpython-310.pyc
+/home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control/__pycache__/inference_correct.cpython-310.pyc
 /home/admin/imdying/src/robot_control/install/robot_control/share/ament_index/resource_index/packages/robot_control
 /home/admin/imdying/src/robot_control/install/robot_control/share/robot_control/package.xml
 /home/admin/imdying/src/robot_control/install/robot_control/lib/python3.10/site-packages/robot_control-0.0.0-py3.10.egg-info/top_level.txt
@@ -28,4 +30,5 @@
 /home/admin/imdying/src/robot_control/install/robot_control/lib/robot_control/correction
 /home/admin/imdying/src/robot_control/install/robot_control/lib/robot_control/gui
 /home/admin/imdying/src/robot_control/install/robot_control/lib/robot_control/inference
+/home/admin/imdying/src/robot_control/install/robot_control/lib/robot_control/inference_correct
 /home/admin/imdying/src/robot_control/install/robot_control/lib/robot_control/master_controller

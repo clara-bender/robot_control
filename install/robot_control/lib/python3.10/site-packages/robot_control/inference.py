@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float32MultiArray, Int32
+from std_msgs.msg import Bool, Float32MultiArray, Int32, Float32
 import numpy as np
 import pyrealsense2 as rs
 from sensor_msgs.msg import Image
@@ -9,11 +9,13 @@ from xarm.wrapper import XArmAPI
 import time
 import threading
 from collections import deque
+from queue import Queue
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.common.constants import HF_LEROBOT_HOME
 from openpi.policies import policy_config
 from openpi.shared import download
 from openpi.training import config as _config
+import copy
 
 class InferenceNode(Node):
     def __init__(self):
@@ -66,6 +68,9 @@ class InferenceNode(Node):
 
         self.manual_gripper = None
         self.manual_servo = None
+
+        self.obs_queue = Queue()
+        self.reward_queue = Queue()
 
         # =========================
         # Policy Setup
@@ -184,7 +189,7 @@ class InferenceNode(Node):
         self.execution_sub = self.create_subscription(Bool, '/execution_selection',self.execution_callback,10)
 
         # Subscriber: correction.py, "manual" commands
-        self.manual_gripper_sub = self.create_subscription(Int32,'/cmd_manual_gripper',self.manual_gripper_callback,10)
+        self.manual_gripper_sub = self.create_subscription(Float32,'/cmd_manual_gripper',self.manual_gripper_callback,10)
         self.manual_servo_sub = self.create_subscription(Float32MultiArray,'/cmd_manual_servo',self.manual_servo_callback,10)
 
         # Subscriber: correction.py, mode toggle (left and right button), True for manual, False for auto
@@ -193,7 +198,7 @@ class InferenceNode(Node):
         # self.auto_gripper_pub = self.create_publisher(Int32, '/cmd_auto_gripper', 10)
         # Publisher: Current robot state
         self.servo_state_pub = self.create_publisher(Float32MultiArray, '/servo_state', 10)
-        self.gripper_state_pub = self.create_publisher(Int32, '/gripper_state', 10)
+        self.gripper_state_pub = self.create_publisher(Float32, '/gripper_state', 10)
 
         # Subscribers: gui.py, save or discard data
         self.save_sub = self.create_subscription(Bool, '/save_button', self.save_callback, 10)
@@ -243,8 +248,10 @@ class InferenceNode(Node):
             self.go_home()
 
     def manual_gripper_callback(self,msg):
+        print("gripper called")
         if self.execute and self.start_correction:
-            self.arm.set_gripper_position(int(msg.data))
+            print("inside if statement")
+            self.arm.set_gripper_position(msg.data)
             # self.manual_gripper = int(msg.data)
             # print("Gripper callled")
 
@@ -255,8 +262,10 @@ class InferenceNode(Node):
                 self.arm.set_servo_cartesian(np.array(msg.data, dtype=np.float32), speed=100, mvacc=1000)
             # self.manual_servo = np.array(msg.data, dtype=np.float32)
             # if 1/(time_end-time_start) > 20:
-            self.observation_curr = self.get_observation()
-            self.collection_loop()
+            # self.observation_curr = self.get_observation()
+            # self.collection_loop()
+            self.obs_queue.put(self.get_observation())
+            self.reward_queue.put(self.failure)
             time_end = time.time()
             print(1/(time_end-time_start))
 
@@ -346,18 +355,23 @@ class InferenceNode(Node):
 
     def save_callback(self, msg):
         save_data = msg.data
-        print(f"Episode length: {self.frames_recorded} frames ********************************")
-        if self.start_collection:
-            if save_data and self.prev_data is not None:
-                self.dataset.save_episode()
-                print(f"Episode saved with {self.frames_recorded} frames.")
-                self.frames_recorded = 0
-                self.prev_data = None
-            if not save_data and self.prev_data is not None:
-                # HARD RESET: clears the in-memory episode buffer
-                self.dataset = LeRobotDataset(root=self.dataset_path,repo_id=self.REPO_NAME,)
-                self.get_logger().info("Episode discarded, buffer cleared.")
-                self.prev_data = None
+        print(f"Episode length: {self.obs_queue.qsize()} frames ********************************")
+        # if self.start_collection:
+        if save_data:# and self.prev_data is not None:
+            self.collection_loop()
+            self.dataset.save_episode()
+            print(f"Episode saved with {self.frames_recorded} frames.")
+            self.frames_recorded = 0
+            self.prev_data = None
+        if not save_data:# and self.prev_data is not None:
+            # HARD RESET: clears the in-memory episode buffer
+            # self.dataset = LeRobotDataset(root=self.dataset_path,repo_id=self.REPO_NAME,)
+            while not self.obs_queue.empty():
+                self.obs_queue.get()
+            while not self.reward_queue.empty():
+                self.reward_queue.get()
+            self.get_logger().info("Episode discarded, buffer cleared.")
+            self.prev_data = None
 
 
     # def discard_callback(self, msg):
@@ -441,11 +455,14 @@ class InferenceNode(Node):
     def collection_loop(self):
         # if self.start_collection:
 
-            print("collllllllllllllllllllllllllllllected yayyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
+            # print("collllllllllllllllllllllllllllllected yayyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
             # if self.start_correction:
             #     self.observation_curr = self.get_observation()
+
+        while not self.obs_queue.empty():
             
-            obs = self.observation_curr.copy()
+            # obs = copy.deepcopy(self.observation_curr)
+            obs = self.obs_queue.get()
             tripod_camera = obs["observation/exterior_image_1_left"]
             wrist_camera = obs["observation/wrist_image_left"]
             gripper_pos = obs["observation/gripper_position"]
@@ -453,7 +470,9 @@ class InferenceNode(Node):
 
             total_state = np.concatenate((servo_state,np.array([gripper_pos],dtype=np.float32)))
 
-            if self.failure:
+            reward = self.reward_queue.get()
+
+            if reward:
                 base2 = np.ones_like(tripod_camera) * 255
             else:
                 base2 = np.zeros_like(tripod_camera)
@@ -598,6 +617,8 @@ class InferenceNode(Node):
             t0 = time.perf_counter()
 
             observation = self.get_observation()
+            self.obs_queue.put(observation)
+            self.reward_queue.put(self.failure)
             command = self.get_action(observation)
 
             cmd_joint_pose = command[:6].copy()
@@ -637,8 +658,8 @@ class InferenceNode(Node):
         while self.start and self.manual_mode:
             # print(self.arm.get_position()[1])
                 servo_state_msg = Float32MultiArray(data=self.arm.get_position()[1])
-                gripper_state_msg = Int32(data=0)
-                self.gripper_state_pub.publish(gripper_state_msg)
+                # gripper_state_msg = Float32(data=self.arm.get_gripper_position())
+                # self.gripper_state_pub.publish(gripper_state_msg)
                 self.servo_state_pub.publish(servo_state_msg)
 
                 # self.collection_loop()
