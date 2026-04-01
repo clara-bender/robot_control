@@ -115,7 +115,7 @@ class InferenceNode(Node):
         self.root.update()
 
         # Simulate correction with a timer (for demo)
-        self.timer = None
+        # self.correct_loop = None
 
         # =========================
         # Policy Setup
@@ -234,9 +234,13 @@ class InferenceNode(Node):
                 self.observation_curr = self.get_observation()
                 self.start_correction = True
                 if self.correct_loop is None:
-                    self.correct_loop = self.create_timer(1.0/self.FPS_CORRECT, self.correction_timer)
+                    # self.correct_loop = self.create_timer(1.0/self.FPS_CORRECT, self.correction_timer)
+                    self.correct_loop = threading.Thread(target=self.correction_timer, daemon=True)
+                    self.correct_loop.start()
+                    print("Started correction thread")
                 if self.collect_loop is None and self.start_collection:
                     self.collect_loop = self.create_timer(1.0/self.FPS_COLLECT, self.collection_timer)
+                    # self.collect_loop = threading.Thread(target=self.correction_timer, daemon=True)
         else:
             if self.collect_loop is not None:
                 self.collect_loop.cancel()
@@ -245,7 +249,7 @@ class InferenceNode(Node):
             self.start_correction = False
             self.stop_infer()
             if self.correct_loop is not None:
-                self.correct_loop.cancel()
+                self.correct_loop.join()
                 self.correct_loop = None
             if self.collect_loop is not None:
                 self.collect_loop.cancel()
@@ -262,19 +266,9 @@ class InferenceNode(Node):
         right_button = bool(msg.buttons[1])
 
         if left_button and not self.manual_mode:
-            self.manual_mode = True
-            if self.timer is None:
-                self.timer = self.create_timer(1.0/self.FPS_CORRECT, self.correction_timer)
             self.mode_callback(True)
         if right_button and self.manual_mode:
-            self.manual_mode = False
             self.mode_callback(False)
-            if self.timer is not None:
-                self.timer.cancel()
-                self.timer = None
-                self.servo_state = None
-                self.gripper_state = None
-                print("Cancelled timer")
 
     def start_infer(self):
         if self.wrist_camera is None or self.exterior_camera is None:
@@ -323,13 +317,15 @@ class InferenceNode(Node):
         if self.manual_mode:
             self.start_inference = False
             self.stop_infer()
-            if self.correct_loop is None and self.start:
-                self.correct_loop = self.create_timer(1.0/self.FPS_CORRECT, self.correction_timer)
             self.start_correction = True
+            if self.correct_loop is None and self.start:
+                # self.correct_loop = self.create_timer(1.0/self.FPS_CORRECT, self.correction_timer)
+                self.correct_loop = threading.Thread(target=self.correction_timer, daemon=True)
+                self.correct_loop.start()
         if not self.manual_mode:
             self.start_correction = False
             if self.correct_loop is not None:
-                self.correct_loop.cancel()
+                self.correct_loop.join()
                 self.correct_loop = None
             if self.start:
                 self.start_inference = True
@@ -361,67 +357,83 @@ class InferenceNode(Node):
                 self.prev_data = None
 
     def correction_timer(self):
-            # if self.start_collection:
-            #     self.observation_curr = self.get_observation()
+        if not self.start_correction:
+            return
+        
+        t0 = time.perf_counter()
+        print("inside correction")
+        if self.start_collection:
+            self.observation_curr = self.get_observation()
 
-            # Update gripper for up/down key presses
-            if self.auto_closing:
-                current_val = self.slider.get()
-                if current_val < self.gripper_target:
-                    new_val = min(self.gripper_target, current_val + 0.02)
-                    self.slider.set(new_val)
-                    self.update_gripper(new_val)
-                else:
-                    self.auto_closing = False
+        # Update gripper for up/down key presses
+        if self.auto_closing:
+            current_val = self.slider.get()
+            if current_val < self.gripper_target:
+                new_val = min(self.gripper_target, current_val + 0.02)
+                self.slider.set(new_val)
+                self.update_gripper(new_val)
+            else:
+                self.auto_closing = False
 
-            if self.auto_open:
-                current_val = self.slider.get()
-                if current_val > self.gripper_target:
-                    new_val = max(self.gripper_target, current_val - 0.02)
-                    self.slider.set(new_val)
-                    self.update_gripper(new_val)
-                else:
-                    self.auto_open = False
+        if self.auto_open:
+            current_val = self.slider.get()
+            if current_val > self.gripper_target:
+                new_val = max(self.gripper_target, current_val - 0.02)
+                self.slider.set(new_val)
+                self.update_gripper(new_val)
+            else:
+                self.auto_open = False
 
-            if self.joystick_msg is None:
-                print("Waiting for joystick message")
-                return
+        if self.joystick_msg is None:
+            print("Waiting for joystick message")
+            return
+        
+        # 1) Get current xArm pose
+        curr_pose = self.arm.get_position()[1].copy()
+        curr_pose = np.array(curr_pose)
+        curr_euler = curr_pose[3:] 
+        curr_quat = Rotation.from_euler('xyz', curr_euler, degrees=True)
+
+        # 2) Get cartesian input from the SpaceMouse
+        scale_linear = 140.0
+        scale_angular = 40.0
+        vx, vy, vz, wx, wy, wz = self.latest_axes * np.array([scale_linear]*3 + [scale_angular]*3)
+
+        # 3. Calculate the rotation delta from SpaceMouse (in radians)
+        # angular_velocity * dt
+        delta_euler = np.array([wx, wy, wz]) * self.dt * (np.pi / 180.0)
+        delta_quat = Rotation.from_rotvec(delta_euler)
             
-            # 1) Get current xArm pose
-            curr_pose = self.arm.get_position()[1]
-            curr_pose = np.array(curr_pose)
-            curr_euler = curr_pose[3:] 
-            curr_quat = Rotation.from_euler('xyz', curr_euler, degrees=True)
+        # 4. Apply the delta (Matrix multiplication handles the rotation)
+        new_quat = delta_quat * curr_quat
+        new_euler = new_quat.as_euler('xyz', degrees=True)
 
-            # 2) Get cartesian input from the SpaceMouse
-            scale_linear = 140.0
-            scale_angular = 40.0
-            vx, vy, vz, wx, wy, wz = self.latest_axes * np.array([scale_linear]*3 + [scale_angular]*3)
+        new_xyz = curr_pose[:3] + np.array([vx, vy, vz]) * self.dt
 
-            # 3. Calculate the rotation delta from SpaceMouse (in radians)
-            # angular_velocity * dt
-            delta_euler = np.array([wx, wy, wz]) * self.dt * (np.pi / 180.0)
-            delta_quat = Rotation.from_rotvec(delta_euler)
-                
-            # 4. Apply the delta (Matrix multiplication handles the rotation)
-            new_quat = delta_quat * curr_quat
-            new_euler = new_quat.as_euler('xyz', degrees=True)
+        # 5. Combine with new XYZ positions
+        cmd_manual_servo = np.concatenate([new_xyz, new_euler])
 
-            new_xyz = curr_pose[:3] + np.array([vx, vy, vz]) * self.dt
+        # 6) Convert the slider [0..1] to a gripper command (0 => 850, 1 => -10)
+        cmd_manual_gripper = 850 - 860 * self.gripper_position
 
-            # 5. Combine with new XYZ positions
-            cmd_manual_servo = np.concatenate([new_xyz, new_euler])
+        # 7) Publish the gripper and servo commands
+        # 8) Command the xArm
+        self.arm.set_servo_cartesian(cmd_manual_servo, speed=300, mvacc=2000)
+        self.arm.set_gripper_position(cmd_manual_gripper)
 
-            # 6) Convert the slider [0..1] to a gripper command (0 => 850, 1 => -10)
-            cmd_manual_gripper = 850 - 860 * self.gripper_position
+        # Final step: update GUI & remember button states
+        # self.root.update()
 
-            # 7) Publish the gripper and servo commands
-            # 8) Command the xArm
-            self.arm.set_servo_cartesian(cmd_manual_servo, speed=300, mvacc=2000)
-            self.arm.set_gripper_position(cmd_manual_gripper)
+        tf = time.perf_counter()
+        # time.sleep(max(1/self.FPS_CORRECT - (tf-t0),0))
 
-            # Final step: update GUI & remember button states
-            self.root.update()
+        # ⏱️ Schedule next iteration
+
+        delay = max(int(1000/self.FPS_CORRECT - (tf - t0)*1000), 0)
+
+        self.root.after(delay, self.correction_timer)
+
+        # print("Correction loop terminated")
 
     def on_close(self):
         self.root.quit()
@@ -458,7 +470,7 @@ class InferenceNode(Node):
         a = self.wrist_camera
         b = self.exterior_camera
 
-        servo_pose = self.arm.get_position()[1]
+        servo_pose = self.arm.get_position()[1].copy()
         # with self.condition_variable:
         #     pose = self.servo_state.copy() # x,y,z,roll,pitch,yaw
         #     g_p = self.gripper_state
